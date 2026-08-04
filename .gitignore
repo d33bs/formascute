@@ -181,6 +181,12 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
+# Nextflow and FormaScute run outputs
+.nextflow/
+.nextflow.log*
+work/
+results/
+
 # PyCharm
 #   JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #   be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
