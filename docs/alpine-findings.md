@@ -14,6 +14,9 @@ image data were used.
   not expose that module during testing.
 - `/usr/bin/apptainer` and `/usr/bin/singularity` are available on the tested
   compute environment.
+- A project-owned `uv` install under `/projects/$USER/software/uv` can build a
+  Python 3.12 ZedProfiler environment when the documented CURC `uv` module is
+  not visible.
 
 The validated smoke command was:
 
@@ -48,6 +51,7 @@ All runs validated successfully.
 | sequential | `nf1_featurization_batched` | 16 | 4 | 00:00:41 | 5 | 1 s |
 | sequential | `nf1_queue_size_4` | 16 | 1 | 00:01:02 | 17 | 1 s |
 | burst | `zp_synthetic_features` | 4 | 1 | about 00:00:42 | 5 | 0-1 s |
+| direct `uv` env | `zp_synthetic_features` | 4 | 1 | about 00:00:16 task span | 5 | 0-1 s |
 
 ## ZedProfiler-Shaped Probe
 
@@ -87,6 +91,61 @@ present in the tested base environment. A production NF1/ZedProfiler run should
 therefore use a project-owned environment or container instead of the default
 `Persistence1` Python.
 
+## uv Environment Probe
+
+CURC documents `module load uv`, with `$UV_ENVS` set to
+`/projects/$USER/software/uv/envs`, as the preferred `uv` environment location.
+During validation on `2026-08-04`, `module avail uv` and `module spider uv` did
+not find that module on either the regular login node or `Persistence1`.
+
+A user-space fallback worked:
+
+```bash
+export UV_HOME="/projects/$USER/software/uv"
+export UV_INSTALL_DIR="$UV_HOME/bin"
+export UV_ENVS="$UV_HOME/envs"
+export UV_CACHE_DIR="/scratch/alpine/$USER/uv-cache"
+export PATH="$UV_INSTALL_DIR:$PATH"
+export UV_LINK_MODE=copy
+
+uv venv "$UV_ENVS/zedprofiler-simple" --python 3.12
+source "$UV_ENVS/zedprofiler-simple/bin/activate"
+uv pip install zedprofiler
+```
+
+Observed result:
+
+- `uv 0.12.1` installed under `/projects/$USER/software/uv/bin`.
+- The environment used `/usr/bin/python3.12`, reporting Python `3.12.13`.
+- ZedProfiler `0.1.1` installed and imported.
+- Wheels resolved for previously missing dependencies including `mahotas`,
+  `pyarrow`, `numpy`, `pandas`, and `scikit-image`.
+- Keeping `UV_CACHE_DIR` on scratch and the environment under `/projects` causes
+  cross-filesystem hardlink fallback; `UV_LINK_MODE=copy` should be set
+  intentionally for this layout.
+
+The simple Nextflow experiment also completed with the `uv` environment active:
+
+```bash
+cd /scratch/alpine/$USER/formascute-codex-test
+module load nextflow/25.10.2
+source "/projects/$USER/software/uv/envs/zedprofiler-simple/bin/activate"
+make run EXPERIMENT=zp_synthetic_features ITEMS=4 ACCOUNT=amc-general PROFILE=alpine RUN_ID=zp-sim-uv-01
+```
+
+Result:
+
+- Nextflow exit status was `0`.
+- validation passed for 4 expected items.
+- the run emitted 16 simulated feature rows.
+- `trace.tsv` contained 4 feature tasks and 1 validation task.
+- `slurm.tsv` was collected for account `amc-general`.
+
+This upgrades the ZedProfiler runtime recommendation from "project-owned
+environment or container" to "`uv` environment first, Apptainer if native wheels
+or system libraries fail." It still does not validate real NF1 image I/O or a
+real ZedProfiler feature call inside a workflow task.
+
 ## Interpretation
 
 - Nextflow can successfully submit and track Slurm jobs on Alpine when submitted
@@ -102,6 +161,12 @@ therefore use a project-owned environment or container instead of the default
   control knob for NF1-style work.
 - The ZedProfiler-shaped probe behaved like the earlier tiny fan-out tests:
   scheduler wait was negligible, and task overhead dominated actual work.
+- `uv` is a practical first runtime path for ZedProfiler on Alpine, even though
+  the documented module was not visible during testing.
+- The current `make submit` coordinator is not yet the best `uv` interface
+  because it treats `FORMASCUTE_ENV_DIR` as a replacement for module loading.
+  For now, direct `Persistence1` runs should load Nextflow first and then
+  activate the `uv` environment.
 
 ## Recommended NF1 Orchestration Direction
 
@@ -114,7 +179,10 @@ Recommended first implementation:
 - Use one Nextflow process for CPU featurization work items.
 - Keep the existing Python feature scripts as the task payload.
 - Use Slurm executor with `acpu`, `cpu-normal`, and account configuration.
-- Build an explicit ZedProfiler runtime environment before real data tests.
+- Use a project-owned `uv` environment as the first ZedProfiler runtime before
+  real data tests.
+- Update the coordinator bootstrap so it can load the Nextflow module and
+  activate a separate Python runtime environment in the same submitted job.
 - Start with independent jobs for real feature tasks when each task loads a
   single image-set and runs enough feature work to amortize Slurm overhead.
 - Add optional batching when individual feature calls are very short or repeatedly
@@ -135,6 +203,10 @@ Avoid for the first production-facing iteration:
 - Mixing CPU and GPU work in one executor profile.
 - Running real NF1 image data before a tiny real-work probe is designed.
 - Relying on the base `Persistence1` Python environment for ZedProfiler.
+- Assuming the documented CURC `uv` module is available without checking
+  `module spider uv`.
+- Pointing `FORMASCUTE_ENV_DIR` at the `uv` environment before the submit
+  wrapper can separately load Nextflow.
 
 ## Questions For CURC
 
@@ -150,5 +222,7 @@ Ask CURC these before scaling:
   independent submission easier for accounting and retries?
 - Should CPU featurization and SAMMed3D GPU work be split into separate Nextflow
   profiles and runs?
-- Should ZedProfiler be installed as a project conda/uv environment or as an
-  Apptainer image for production NF1 runs?
+- Is CURC's documented `uv` module expected to be available on Alpine now, and
+  if so, which module tree or host should expose it?
+- For production NF1 runs, is a project-owned `uv` environment acceptable, or
+  should CURC prefer an Apptainer image once image I/O dependencies are known?

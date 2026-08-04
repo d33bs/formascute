@@ -145,6 +145,85 @@ Apptainer image. For NF1, prefer grouping compatible ZedProfiler feature familie
 by image-set when possible so each task loads image data once and writes validated
 outputs.
 
+## uv For ZedProfiler
+
+CURC documents a `uv` module for Python environments. The documented flow is:
+
+```bash
+module load uv
+uv venv "$UV_ENVS/mycustomenv" --python 3.12
+source "$UV_ENVS/mycustomenv/bin/activate"
+uv pip install <packages>
+```
+
+The documentation says `module load uv` creates and sets `UV_ENVS` to
+`/projects/$USER/software/uv/envs`. During live validation on `2026-08-04`,
+neither the regular login node nor `Persistence1` exposed an `uv` module via
+`module avail uv` or `module spider uv`.
+
+The tested fallback is a project-owned `uv` install that keeps the same CURC
+environment layout:
+
+```bash
+export UV_HOME="/projects/$USER/software/uv"
+export UV_INSTALL_DIR="$UV_HOME/bin"
+export UV_ENVS="$UV_HOME/envs"
+export UV_CACHE_DIR="/scratch/alpine/$USER/uv-cache"
+export PATH="$UV_INSTALL_DIR:$PATH"
+mkdir -p "$UV_INSTALL_DIR" "$UV_ENVS" "$UV_CACHE_DIR"
+
+if [[ ! -x "$UV_INSTALL_DIR/uv" ]]; then
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+fi
+
+uv venv "$UV_ENVS/zedprofiler-simple" --python 3.12
+source "$UV_ENVS/zedprofiler-simple/bin/activate"
+uv pip install zedprofiler
+python - <<'PY'
+import importlib.metadata as metadata
+import zedprofiler
+print(metadata.version("zedprofiler"))
+print(zedprofiler.__file__)
+PY
+```
+
+Observed validation:
+
+- `uv 0.12.1` installed under `/projects/$USER/software/uv/bin`
+- `uv venv --python 3.12` used `/usr/bin/python3.12`
+- ZedProfiler `0.1.1` installed and imported
+- heavy dependencies resolved as wheels, including `mahotas`, `pyarrow`,
+  `numpy`, `pandas`, and `scikit-image`
+- with `UV_CACHE_DIR` on scratch and the env under `/projects`, `uv` warned
+  that hardlinking was not available and fell back to copying; set
+  `UV_LINK_MODE=copy` to make that explicit
+
+Validated simple experiment using the `uv` environment:
+
+```bash
+cd /scratch/alpine/$USER/formascute-codex-test
+module load nextflow/25.10.2
+source "/projects/$USER/software/uv/envs/zedprofiler-simple/bin/activate"
+make run EXPERIMENT=zp_synthetic_features ITEMS=4 ACCOUNT=amc-general PROFILE=alpine RUN_ID=zp-sim-uv-01
+```
+
+Observed result:
+
+- Nextflow ran from `/curc/sw/install/bio/nextflow/25.10.2_env/bin/nextflow`
+- `python3` resolved to the `uv` environment
+- preflight recorded Python `3.12.13`
+- `completion_status.txt` reported `nextflow_exit_status: 0`
+- `validation.json` reported `"valid": true`
+- 4 feature tasks plus 1 validation task were submitted to Slurm
+- 16 simulated feature rows were emitted
+
+For current repository behavior, prefer this direct `Persistence1` run pattern
+when testing `uv`: load the Nextflow module first, then activate the `uv`
+environment before invoking `make run`. The generated `make submit` coordinator
+currently treats `FORMASCUTE_ENV_DIR` as a replacement environment and skips
+module loading when it exists, so it is not yet the right interface for a
+combined Nextflow-module plus `uv` Python environment.
+
 ## Important Failure Mode
 
 Submitting directly from the regular Alpine login node failed because the batch
