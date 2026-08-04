@@ -56,6 +56,15 @@ make submit EXPERIMENT=nf1_submit_rate_4 ITEMS=16 ACCOUNT=<allocation> SUBMIT_HO
 make submit EXPERIMENT=zp_synthetic_features ITEMS=8 ACCOUNT=<allocation> SUBMIT_HOST=Persistence1
 ```
 
+For `uv` runtime checks, use a direct `Persistence1` run until the submit
+wrapper can load the Nextflow module and activate a separate Python environment:
+
+```bash
+module load nextflow/25.10.2
+source "/projects/$USER/software/uv/envs/zedprofiler-simple/bin/activate"
+make run EXPERIMENT=zp_synthetic_features ITEMS=4 ACCOUNT=<allocation> PROFILE=alpine
+```
+
 Interpretation:
 
 - `nf1_minimal_overhead` estimates Nextflow + Slurm coordinator overhead before
@@ -94,9 +103,17 @@ tasks. On Alpine, the base `Persistence1` Python environment is not ready for
 real ZedProfiler work because it provides Python 3.9 and lacks required packages
 such as `mahotas`, `pyarrow`, and `zedprofiler`.
 
+A project-owned `uv` environment is now the preferred first runtime path:
+Python 3.12.13, ZedProfiler `0.1.1`, `mahotas`, `pyarrow`, `numpy`, `pandas`,
+and `scikit-image` installed and imported successfully from
+`/projects/$USER/software/uv/envs/zedprofiler-simple`. The documented CURC `uv`
+module was not visible during validation, so the tested fallback installs `uv`
+under `/projects/$USER/software/uv/bin` and uses scratch for `UV_CACHE_DIR`.
+
 For the NF1 refactor, prefer:
 
-- a project-owned Python 3.11+ environment or Apptainer image for ZedProfiler
+- a project-owned `uv` Python 3.11+ environment first, with Apptainer as the
+  fallback if native wheels or system libraries fail
 - a Nextflow process that consumes a manifest of image-set work items
 - task payloads that can compute multiple compatible feature families after one
   image load
@@ -106,9 +123,9 @@ For the NF1 refactor, prefer:
 ## What This Does Not Answer Yet
 
 These experiments do not measure image-processing runtime, GPU memory, CellPose,
-SAMMed3D, DuckDB, parquet performance, or real ZedProfiler dependency
-installation. They only characterize scheduler, submission, retry, validation,
-and artifact behavior with a small controlled workload.
+SAMMed3D, DuckDB, parquet performance, or real ZedProfiler feature execution.
+They only characterize scheduler, submission, retry, validation, artifact
+behavior, and the basic viability of installing/importing ZedProfiler with `uv`.
 
 Do not use NF1 image data in this phase. Data-based testing belongs in a later
 phase, after synthetic runs have shown stable submission, accounting,

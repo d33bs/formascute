@@ -26,8 +26,10 @@ This should be a thin workflow layer around real work, not a broad rewrite.
   separate profiles or separate runs.
 - Do not rely on the base `Persistence1` Python for ZedProfiler. It is Python
   3.9 and lacks required packages.
-- Use a project-owned Python 3.11+ environment or an Apptainer image for
-  ZedProfiler.
+- Use a project-owned `uv` Python 3.11+ environment as the first ZedProfiler
+  runtime path; use Apptainer if native wheels or system libraries fail.
+- The documented CURC `uv` module was not visible during validation, but a
+  user-space `uv` install under `/projects/$USER/software/uv/bin` worked.
 
 ## Target Shape
 
@@ -140,7 +142,7 @@ feature extraction with a tiny controlled manifest.
 Recommended slice:
 
 1. Add a manifest builder for a few known-safe image-sets.
-2. Add a ZedProfiler runtime environment definition.
+2. Add a ZedProfiler `uv` runtime environment definition.
 3. Add one Nextflow process for CPU feature extraction.
 4. Add per-task validation and summary output.
 5. Run one image-set with real ZedProfiler on Alpine.
@@ -155,7 +157,7 @@ or production data movement in the first slice.
 Scale only after these gates pass:
 
 - formascute synthetic Alpine checks pass from a fresh clone
-- ZedProfiler environment builds reproducibly on Alpine
+- ZedProfiler `uv` environment builds reproducibly on Alpine
 - one real image-set completes and validates
 - 4-8 real image-sets complete and validate
 - `trace.tsv` and `slurm.tsv` show acceptable queue wait and memory use
@@ -178,7 +180,7 @@ Avoid these as first moves:
 
 The best direction today is a thin Nextflow wrapper around NF1 Stage 3 that
 consumes a manifest of image-set work items and runs ZedProfiler in a controlled
-Python 3.11+ environment. Start with independent CPU tasks on `acpu` /
+`uv` Python 3.11+ environment. Start with independent CPU tasks on `acpu` /
 `cpu-normal` through `Persistence1`, validate every output, collect trace and
 Slurm accounting, and tune batching only after real image-set runtimes show
 whether repeated image loading or scheduler overhead dominates.
