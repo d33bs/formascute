@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use formascute, please cite this repository."
+title: "formascute"
+abstract: >-
+  Small, reproducible characterization experiments for understanding workflow
+  execution on HPC systems before running production science.
+authors:
+  - name: "formascute contributors"
+license: "BSD-3-Clause"
+type: software
+keywords:
+  - high-performance computing
+  - workflow orchestration
+  - nextflow
+  - slurm
+  - reproducible research

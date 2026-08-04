@@ -1,0 +1,8 @@
+repos:
+  - repo: local
+    hooks:
+      - id: formascute-check
+        name: formascute lint
+        entry: bash scripts/lint
+        language: system
+        pass_filenames: false

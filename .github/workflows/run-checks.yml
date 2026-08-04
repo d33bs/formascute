@@ -1,0 +1,31 @@
+---
+name: checks
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  prek:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6.0.0
+        with:
+          node-version: "24"
+
+      - name: Run prek
+        uses: j178/prek-action@v3.0.0

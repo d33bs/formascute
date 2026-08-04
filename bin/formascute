@@ -1,0 +1,618 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() {
+  cat <<'USAGE'
+formascute
+
+Usage:
+  bin/formascute doctor
+  bin/formascute check
+  bin/formascute preflight [--run-id ID] [--account NAME] [--partition NAME] [--qos NAME]
+  bin/formascute run-local-smoke [--run-id ID]
+  bin/formascute run EXPERIMENT [--profile PROFILE] [--run-id ID] [--items N] [--batch-size N] [--account NAME] [--partition NAME] [--qos NAME]
+  bin/formascute submit EXPERIMENT [--run-id ID] [--items N] [--batch-size N] [--account NAME] [--partition NAME] [--qos NAME] [--submit-host HOST] [--dry-run]
+
+Examples:
+  bin/formascute doctor
+  bin/formascute check
+  bin/formascute preflight --account <allocation>
+  bin/formascute run-local-smoke
+  bin/formascute run independent_jobs --profile alpine --items 16
+  bin/formascute run batched_jobs --profile alpine --items 16 --batch-size 4
+  bin/formascute submit independent_jobs --items 16 --account <allocation>
+
+Experiments:
+  independent_jobs
+  batched_jobs
+  queue_size_20
+  nf1_minimal_overhead
+  nf1_featurization_independent
+  nf1_featurization_batched_2
+  nf1_featurization_batched
+  nf1_queue_size_4
+  nf1_queue_size_20
+  nf1_submit_rate_4
+  zp_synthetic_features
+
+Options:
+  EXPERIMENT       Experiment config name from conf/experiments without .config.
+  --profile        Nextflow profile to use for direct runs. Default: alpine.
+  --run-id         Output directory name under results/. Default: UTC timestamp.
+  --items          Number of synthetic work items. Default: 16.
+  --batch-size     Work items per Nextflow task. Default: 1, 8 for batched_jobs, or 4 for nf1_featurization_batched.
+  --account        Slurm account/allocation. Default: FORMASCUTE_ACCOUNT or none.
+  --partition      Slurm partition. Default: FORMASCUTE_PARTITION or acpu.
+  --qos            Slurm QoS. Default: FORMASCUTE_QOS or cpu-normal.
+  --submit-host    Optional SSH host used to run sbatch. Example: Persistence1.
+
+Environment:
+  FORMASCUTE_NEXTFLOW_MODULE    Module loaded by generated Slurm scripts. Default: nextflow/25.10.2.
+  FORMASCUTE_CONTAINER_MODULE   Optional container module loaded by generated Slurm scripts.
+  FORMASCUTE_ENABLE_CONTAINER   Enable Nextflow Singularity support. Default: false.
+  FORMASCUTE_ENV_DIR            Repo-local bootstrap environment. Default: .formascute/conda.
+  FORMASCUTE_SCRATCH            Shared scratch root. Default: /scratch/alpine/$USER.
+  FORMASCUTE_PROJECT            Project root for caches. Default: /projects/$USER.
+USAGE
+}
+
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+run_id() {
+  date -u +"%Y%m%dT%H%M%SZ"
+}
+
+validate_name() {
+  local label="$1"
+  local value="$2"
+  if [[ -n "$value" && ! "$value" =~ ^[A-Za-z0-9_.@:+-]+$ ]]; then
+    echo "$label contains unsupported characters: $value" >&2
+    exit 2
+  fi
+}
+
+validate_positive_int() {
+  local label="$1"
+  local value="$2"
+  local max="$3"
+  if [[ ! "$value" =~ ^[0-9]+$ || "$value" -lt 1 || "$value" -gt "$max" ]]; then
+    echo "$label must be an integer from 1 to $max" >&2
+    exit 2
+  fi
+}
+
+run_capture() {
+  local output="$1"
+  shift
+  {
+    printf '$'
+    printf ' %q' "$@"
+    printf '\n'
+    "$@"
+  } > "$output" 2>&1 || {
+    local status=$?
+    printf '\nexit_status: %s\n' "$status" >> "$output"
+    return 0
+  }
+}
+
+check_repo() {
+  local failed=0
+  local required=(
+    "Makefile"
+    "CITATION.cff"
+    "CODE_OF_CONDUCT.md"
+    "CONTRIBUTING.md"
+    "AGENTS.md"
+    ".agents/skills/alpine.md"
+    ".markdownlint-cli2.yaml"
+    "nextflow.config"
+    "conf/alpine.reference.config"
+    "conf/characterization.config"
+    "scripts/bootstrap"
+    "scripts/check"
+    "scripts/lint"
+    "workflows/synthetic.nf"
+    "docs/hpc-quickstart.md"
+    "docs/production-checklist.md"
+    "docs/alpine-findings.md"
+    "docs/nf1-pipeline-target.md"
+    "docs/north-star.md"
+  )
+
+  echo "formascute repository check"
+  for path in "${required[@]}"; do
+    if [[ -e "$ROOT_DIR/$path" ]]; then
+      echo "ok: $path"
+    else
+      echo "missing: $path" >&2
+      failed=1
+    fi
+  done
+
+  if bash -n "$ROOT_DIR/bin/formascute"; then
+    echo "ok: bin/formascute syntax"
+  else
+    failed=1
+  fi
+
+  if find "$ROOT_DIR/conf/experiments" -maxdepth 1 -type f -name '*.config' | grep -q .; then
+    echo "ok: experiment configs found"
+  else
+    echo "missing: experiment configs" >&2
+    failed=1
+  fi
+
+  mkdir -p "$ROOT_DIR/results"
+  if [[ -w "$ROOT_DIR/results" ]]; then
+    echo "ok: results directory writable"
+  else
+    echo "not writable: results" >&2
+    failed=1
+  fi
+
+  return "$failed"
+}
+
+write_experiment_file() {
+  local outdir="$1"
+  local experiment="$2"
+  local profile="$3"
+  local id="$4"
+  local items="$5"
+  local batch_size="$6"
+  local account="$7"
+  local partition="$8"
+  local qos="$9"
+
+  mkdir -p "$outdir"
+  cat > "$outdir/experiment.yaml" <<EOF
+run_id: "$id"
+experiment: "$experiment"
+profile: "$profile"
+items: $items
+batch_size: $batch_size
+slurm_account: "$account"
+slurm_partition: "$partition"
+slurm_qos: "$qos"
+created_utc: "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+git_commit: "$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+workflow: "workflows/synthetic.nf"
+EOF
+}
+
+preflight() {
+  local id="$1"
+  local account="$2"
+  local partition="$3"
+  local qos="$4"
+  local outdir="$ROOT_DIR/results/$id/preflight"
+
+  validate_name "run-id" "$id"
+  validate_name "account" "$account"
+  validate_name "partition" "$partition"
+  validate_name "qos" "$qos"
+
+  mkdir -p "$outdir"
+
+  {
+    echo "run_id: $id"
+    echo "created_utc: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    echo "repo: $ROOT_DIR"
+    echo "host: $(hostname 2>/dev/null || true)"
+    echo "user: ${USER:-}"
+    echo "pwd: $(pwd)"
+    echo "account: $account"
+    echo "partition: $partition"
+    echo "qos: $qos"
+    echo "git_commit: $(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+  } > "$outdir/summary.txt"
+
+  env | sort > "$outdir/environment.txt"
+  run_capture "$outdir/nextflow-version.txt" nextflow -version
+  run_capture "$outdir/python-version.txt" python3 --version
+
+  if have sinfo; then
+    run_capture "$outdir/sinfo.txt" sinfo -o "%P|%a|%l|%D|%t|%c|%m|%f|%G"
+    run_capture "$outdir/sinfo-target-partition.txt" sinfo -p "$partition" -o "%P|%a|%l|%D|%t|%c|%m|%f|%G"
+  fi
+
+  if have squeue; then
+    run_capture "$outdir/squeue-user.txt" squeue -u "${USER:-}" -o "%.18i %.9P %.30j %.8u %.2t %.10M %.10l %.6D %R"
+  fi
+
+  if have sacctmgr; then
+    run_capture "$outdir/sacctmgr-user.txt" sacctmgr -P show assoc "user=${USER:-}" format=Cluster,Account,User,Partition,QOS
+  fi
+
+  if have sbatch; then
+    run_capture "$outdir/sbatch-version.txt" sbatch --version
+  fi
+
+  if have sacct; then
+    run_capture "$outdir/sacct-version.txt" sacct --version
+  fi
+
+  if have singularity; then
+    run_capture "$outdir/container-runtime.txt" singularity --version
+  elif have apptainer; then
+    run_capture "$outdir/container-runtime.txt" apptainer --version
+  fi
+
+  if type module >/dev/null 2>&1; then
+    module -t list > "$outdir/modules-loaded.txt" 2>&1 || true
+    module -t avail nextflow > "$outdir/modules-nextflow.txt" 2>&1 || true
+    module -t avail singularity > "$outdir/modules-singularity.txt" 2>&1 || true
+    module -t avail apptainer > "$outdir/modules-apptainer.txt" 2>&1 || true
+  fi
+
+  echo "Preflight written to $outdir"
+}
+
+collect_slurm_accounting() {
+  local outdir="$1"
+  local trace="$outdir/trace.tsv"
+  local slurm="$outdir/slurm.tsv"
+
+  if ! have sacct || [[ ! -f "$trace" ]]; then
+    return 0
+  fi
+
+  python3 - "$trace" "$slurm.jobs" <<'PY'
+import csv
+import sys
+
+trace_path, jobs_path = sys.argv[1:3]
+jobs = []
+with open(trace_path, newline="") as handle:
+    reader = csv.DictReader(handle, delimiter="\t")
+    if not reader.fieldnames or "native_id" not in reader.fieldnames:
+        raise SystemExit(0)
+    for row in reader:
+        native_id = (row.get("native_id") or "").strip()
+        if native_id and native_id not in jobs:
+            jobs.append(native_id)
+
+with open(jobs_path, "w") as handle:
+    for job in jobs:
+        handle.write(job + "\n")
+PY
+
+  if [[ -s "$slurm.jobs" ]]; then
+    sacct -j "$(paste -sd, "$slurm.jobs")" --parsable2 \
+      --format=JobID,JobName%40,Partition,Account,AllocCPUS,State,ExitCode,Submit,Start,End,Elapsed,ReqMem,MaxRSS,NTasks,NNodes \
+      > "$slurm" || true
+  fi
+  rm -f "$slurm.jobs"
+}
+
+doctor() {
+  echo "formascute doctor"
+  echo "repo: $ROOT_DIR"
+
+  if have nextflow; then
+    if ! nextflow -version 2>&1 | sed -n '1,6p'; then
+      echo "nextflow: found but not runnable"
+    fi
+  else
+    echo "nextflow: missing"
+  fi
+
+  local env_dir="${FORMASCUTE_ENV_DIR:-$ROOT_DIR/.formascute/conda}"
+  if [[ -x "$env_dir/bin/nextflow" ]]; then
+    echo "bootstrap_nextflow: $env_dir/bin/nextflow"
+  else
+    echo "bootstrap_nextflow: missing"
+  fi
+
+  if have sbatch; then
+    echo "sbatch: $(command -v sbatch)"
+  else
+    echo "sbatch: missing"
+  fi
+
+  if have sacct; then
+    echo "sacct: $(command -v sacct)"
+  else
+    echo "sacct: missing"
+  fi
+
+  if have singularity; then
+    singularity --version
+  elif have apptainer; then
+    apptainer --version
+  else
+    echo "singularity/apptainer: missing"
+  fi
+}
+
+run_nextflow() {
+  local experiment="$1"
+  local profile="$2"
+  local id="$3"
+  local items="$4"
+  local batch_size="$5"
+  local account="$6"
+  local partition="$7"
+  local qos="$8"
+  local outdir="$ROOT_DIR/results/$id"
+  local experiment_config="$ROOT_DIR/conf/experiments/${experiment}.config"
+
+  validate_name "run-id" "$id"
+  validate_name "experiment" "$experiment"
+  validate_name "profile" "$profile"
+  validate_name "account" "$account"
+  validate_name "partition" "$partition"
+  validate_name "qos" "$qos"
+  validate_positive_int "items" "$items" 256
+  validate_positive_int "batch-size" "$batch_size" 64
+
+  if [[ ! -f "$experiment_config" ]]; then
+    echo "Unknown experiment: $experiment" >&2
+    exit 2
+  fi
+
+  if ! have nextflow; then
+    echo "nextflow is required for runs" >&2
+    exit 127
+  fi
+
+  write_experiment_file "$outdir" "$experiment" "$profile" "$id" "$items" "$batch_size" "$account" "$partition" "$qos"
+  preflight "$id" "$account" "$partition" "$qos"
+
+  {
+    echo "FORMASCUTE_ACCOUNT=\"$account\" FORMASCUTE_PARTITION=\"$partition\" FORMASCUTE_QOS=\"$qos\" nextflow run workflows/synthetic.nf -profile $profile --run_id $id --outdir $outdir --items $items --batch_size $batch_size"
+  } > "$outdir/run-command.txt"
+
+  set +e
+  FORMASCUTE_ACCOUNT="$account" FORMASCUTE_PARTITION="$partition" FORMASCUTE_QOS="$qos" \
+    nextflow run "$ROOT_DIR/workflows/synthetic.nf" \
+      -profile "$profile" \
+      -c "$ROOT_DIR/nextflow.config" \
+      -c "$ROOT_DIR/conf/characterization.config" \
+      -c "$experiment_config" \
+      --run_id "$id" \
+      --outdir "$outdir" \
+      --items "$items" \
+      --batch_size "$batch_size" \
+      2>&1 | tee "$outdir/nextflow.log"
+  local nextflow_status="${PIPESTATUS[0]}"
+  set -e
+
+  collect_slurm_accounting "$outdir"
+  echo "nextflow_exit_status: $nextflow_status" > "$outdir/completion_status.txt"
+
+  if [[ "$nextflow_status" -ne 0 ]]; then
+    echo "Run failed; artifacts written to $outdir" >&2
+    exit "$nextflow_status"
+  fi
+
+  echo "Run written to $outdir"
+}
+
+submit_slurm() {
+  local experiment="$1"
+  local id="$2"
+  local items="$3"
+  local batch_size="$4"
+  local account="$5"
+  local partition="$6"
+  local qos="$7"
+  local dry_run="$8"
+  local submit_host="$9"
+  local outdir="$ROOT_DIR/results/$id"
+  local script="$outdir/coordinator.sbatch"
+  local experiment_config="$ROOT_DIR/conf/experiments/${experiment}.config"
+  local account_directive=""
+  local qos_directive=""
+
+  validate_name "run-id" "$id"
+  validate_name "experiment" "$experiment"
+  validate_name "account" "$account"
+  validate_name "partition" "$partition"
+  validate_name "qos" "$qos"
+  validate_name "submit-host" "$submit_host"
+  validate_positive_int "items" "$items" 256
+  validate_positive_int "batch-size" "$batch_size" 64
+
+  if [[ ! -f "$experiment_config" ]]; then
+    echo "Unknown experiment: $experiment" >&2
+    exit 2
+  fi
+
+  if [[ "$dry_run" != "true" && -z "$submit_host" ]] && ! have sbatch; then
+    echo "sbatch is required for submit" >&2
+    exit 127
+  fi
+
+  if [[ "$dry_run" != "true" && -n "$submit_host" ]] && ! have ssh; then
+    echo "ssh is required when --submit-host is used" >&2
+    exit 127
+  fi
+
+  if [[ -n "$account" ]]; then
+    account_directive="#SBATCH --account=$account"
+  fi
+
+  if [[ -n "$qos" ]]; then
+    qos_directive="#SBATCH --qos=$qos"
+  fi
+
+  mkdir -p "$outdir"
+  preflight "$id" "$account" "$partition" "$qos"
+  cat > "$script" <<EOF
+#!/usr/bin/env bash
+#SBATCH --job-name=formascute
+#SBATCH --partition=$partition
+$account_directive
+$qos_directive
+#SBATCH --time=01:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=8G
+#SBATCH --output=$outdir/coordinator_%j.out
+#SBATCH --error=$outdir/coordinator_%j.err
+
+set -euo pipefail
+
+cd "$ROOT_DIR"
+
+FORMASCUTE_ENV_DIR="\${FORMASCUTE_ENV_DIR:-$ROOT_DIR/.formascute/conda}"
+if [[ -f "\$FORMASCUTE_ENV_DIR/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "\$FORMASCUTE_ENV_DIR/bin/activate"
+elif type module >/dev/null 2>&1; then
+  module purge
+  if [[ -n "\${FORMASCUTE_NEXTFLOW_MODULE:-nextflow/25.10.2}" && "\${FORMASCUTE_NEXTFLOW_MODULE:-nextflow/25.10.2}" != "none" ]]; then
+    module load "\${FORMASCUTE_NEXTFLOW_MODULE:-nextflow/25.10.2}"
+  fi
+  if [[ -n "\${FORMASCUTE_CONTAINER_MODULE:-}" && "\${FORMASCUTE_CONTAINER_MODULE:-}" != "none" ]]; then
+    module load "\${FORMASCUTE_CONTAINER_MODULE}"
+  fi
+else
+  echo "Environment modules are not available; using commands already on PATH."
+fi
+
+FORMASCUTE_ACCOUNT="$account" FORMASCUTE_PARTITION="$partition" FORMASCUTE_QOS="$qos" \\
+  bash bin/formascute run "$experiment" --profile alpine --run-id "$id" --items "$items" --batch-size "$batch_size"
+EOF
+
+  if [[ "$dry_run" == "true" ]]; then
+    echo "Dry run: not submitting to Slurm" | tee "$outdir/slurm-submit.txt"
+  elif [[ -n "$submit_host" ]]; then
+    # shellcheck disable=SC2029
+    ssh "$submit_host" "cd '$ROOT_DIR' && sbatch '$script'" | tee "$outdir/slurm-submit.txt"
+  else
+    sbatch "$script" | tee "$outdir/slurm-submit.txt"
+  fi
+  echo "Coordinator script written to $script"
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  doctor)
+    doctor
+    ;;
+  check)
+    check_repo
+    ;;
+  preflight)
+    id="$(run_id)"
+    account="${FORMASCUTE_ACCOUNT:-}"
+    partition="${FORMASCUTE_PARTITION:-acpu}"
+    qos="${FORMASCUTE_QOS:-cpu-normal}"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --run-id) id="$2"; shift 2 ;;
+        --account) account="$2"; shift 2 ;;
+        --partition) partition="$2"; shift 2 ;;
+        --qos) qos="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; exit 2 ;;
+      esac
+    done
+    preflight "$id" "$account" "$partition" "$qos"
+    ;;
+  run-local-smoke)
+    id="$(run_id)"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --run-id) id="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; exit 2 ;;
+      esac
+    done
+    run_nextflow "independent_jobs" "local_smoke" "$id" 4 1 "" "local" ""
+    ;;
+  run)
+    experiment="${1:-}"
+    if [[ -z "$experiment" ]]; then
+      usage
+      exit 2
+    fi
+    shift
+
+    profile="alpine"
+    id="$(run_id)"
+    items=16
+    account="${FORMASCUTE_ACCOUNT:-}"
+    partition="${FORMASCUTE_PARTITION:-acpu}"
+    qos="${FORMASCUTE_QOS:-cpu-normal}"
+    case "$experiment" in
+      batched_jobs) batch_size=8 ;;
+      nf1_featurization_batched_2) batch_size=2 ;;
+      nf1_featurization_batched) batch_size=4 ;;
+      *) batch_size=1 ;;
+    esac
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --profile) profile="$2"; shift 2 ;;
+        --run-id) id="$2"; shift 2 ;;
+        --items) items="$2"; shift 2 ;;
+        --batch-size) batch_size="$2"; shift 2 ;;
+        --account) account="$2"; shift 2 ;;
+        --partition) partition="$2"; shift 2 ;;
+        --qos) qos="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; exit 2 ;;
+      esac
+    done
+
+    run_nextflow "$experiment" "$profile" "$id" "$items" "$batch_size" "$account" "$partition" "$qos"
+    ;;
+  submit)
+    experiment="${1:-}"
+    if [[ -z "$experiment" ]]; then
+      usage
+      exit 2
+    fi
+    shift
+
+    id="$(run_id)"
+    items=16
+    account="${FORMASCUTE_ACCOUNT:-}"
+    partition="${FORMASCUTE_PARTITION:-acpu}"
+    qos="${FORMASCUTE_QOS:-cpu-normal}"
+    dry_run="false"
+    submit_host="${FORMASCUTE_SUBMIT_HOST:-}"
+    case "$experiment" in
+      batched_jobs) batch_size=8 ;;
+      nf1_featurization_batched_2) batch_size=2 ;;
+      nf1_featurization_batched) batch_size=4 ;;
+      *) batch_size=1 ;;
+    esac
+
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --run-id) id="$2"; shift 2 ;;
+        --items) items="$2"; shift 2 ;;
+        --batch-size) batch_size="$2"; shift 2 ;;
+        --account) account="$2"; shift 2 ;;
+        --partition) partition="$2"; shift 2 ;;
+        --qos) qos="$2"; shift 2 ;;
+        --submit-host) submit_host="$2"; shift 2 ;;
+        --dry-run) dry_run="true"; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; exit 2 ;;
+      esac
+    done
+
+    submit_slurm "$experiment" "$id" "$items" "$batch_size" "$account" "$partition" "$qos" "$dry_run" "$submit_host"
+    ;;
+  -h|--help|"")
+    usage
+    ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    usage
+    exit 2
+    ;;
+esac
