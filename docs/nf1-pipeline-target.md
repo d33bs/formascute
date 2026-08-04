@@ -1,6 +1,6 @@
 # NF1 3D Organoid Pipeline Target
 
-FormaScute is aimed at improving the Alpine execution model for
+formascute is aimed at improving the Alpine execution model for
 `WayScience/NF1_3D_organoid_profiling_pipeline`.
 
 The current NF1 pipeline uses Slurm directly from shell scripts. The largest

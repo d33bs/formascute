@@ -1,19 +1,19 @@
-# FormaScute
+# formascute
 
 Reveal the shape of workflow execution.
 
-FormaScute takes its name from shape and scute: the patterned plates on a turtle
+formascute takes its name from shape and scute: the patterned plates on a turtle
 shell. The project is about seeing the shape of the shell before we need it,
 making each layer of workflow execution visible before production science
 depends on it. 🐢
 
-FormaScute runs small, reproducible characterization experiments for workflow
+formascute runs small, reproducible characterization experiments for workflow
 engines on HPC systems. It starts from a known-working deployment, changes one
 execution setting at a time, validates correctness, and records enough
 provenance to make scheduler and filesystem behavior discussable with HPC
 engineers.
 
-FormaScute is not a benchmarking suite. The goal is to understand execution
+formascute is not a benchmarking suite. The goal is to understand execution
 behavior before running production science.
 
 ## Quick Start
@@ -22,6 +22,7 @@ From the repository root:
 
 ```bash
 make check
+make prek
 make doctor
 make smoke
 ```
@@ -45,6 +46,7 @@ Preflight output is written to `results/<run-id>/preflight/`.
 
 - `make check`: verify the cloned repository has the expected local files and a
   writable `results/` directory.
+- `make prek`: run the same local check configuration used by pull request CI.
 - `make doctor`: show available runtime tools.
 - `make preflight ACCOUNT=amc-general`: record Slurm, module, filesystem, and
   runtime context without submitting work.

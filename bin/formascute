@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
   cat <<'USAGE'
-FormaScute
+formascute
 
 Usage:
   bin/formascute doctor
@@ -105,7 +105,7 @@ check_repo() {
     "docs/nf1-pipeline-target.md"
   )
 
-  echo "FormaScute repository check"
+  echo "formascute repository check"
   for path in "${required[@]}"; do
     if [[ -e "$ROOT_DIR/$path" ]]; then
       echo "ok: $path"
@@ -272,7 +272,7 @@ PY
 }
 
 doctor() {
-  echo "FormaScute doctor"
+  echo "formascute doctor"
   echo "repo: $ROOT_DIR"
 
   if have nextflow; then

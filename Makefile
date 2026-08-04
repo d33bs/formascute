@@ -20,12 +20,13 @@ ifneq ($(strip $(BATCH_SIZE)),)
 ARGS += --batch-size $(BATCH_SIZE)
 endif
 
-.PHONY: help check doctor preflight smoke run submit submit-dry-run list-experiments
+.PHONY: help check prek doctor preflight smoke run submit submit-dry-run list-experiments
 
 help:
 	@bash bin/formascute --help
 	@printf '\nMake targets:\n'
 	@printf '  make check\n'
+	@printf '  make prek\n'
 	@printf '  make doctor\n'
 	@printf '  make preflight ACCOUNT=amc-general\n'
 	@printf '  make smoke\n'
@@ -50,6 +51,17 @@ help:
 
 check:
 	@bash bin/formascute check
+
+prek:
+	@if command -v prek >/dev/null 2>&1; then \
+	  prek run --all-files; \
+	elif command -v pre-commit >/dev/null 2>&1; then \
+	  pre-commit run --all-files; \
+	else \
+	  printf 'Install prek or pre-commit, then rerun: make prek\n' >&2; \
+	  printf '  python -m pip install prek\n' >&2; \
+	  exit 127; \
+	fi
 
 doctor:
 	@bash bin/formascute doctor

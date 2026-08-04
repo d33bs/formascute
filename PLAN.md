@@ -1,13 +1,13 @@
-# FormaScute
+# formascute
 
-**FormaScute** is a reproducible characterization framework for
+**formascute** is a reproducible characterization framework for
 understanding how scientific workflows execute on HPC systems.
 
 > *Reveal the shape of workflow execution.*
 
 ## Philosophy
 
-FormaScute is **not** a benchmarking suite.
+formascute is **not** a benchmarking suite.
 
 It is a characterization framework that helps answer engineering
 questions about workflow execution by running small, reproducible
@@ -164,13 +164,13 @@ Each run produces:
 
 ## Questions for HPC engineers
 
-FormaScute should never guess.
+formascute should never guess.
 
 When observations cannot be explained, generate concise engineering
 questions supported by reproducible evidence.
 
 ## Long-term vision
 
-FormaScute becomes a reusable characterization framework that any
+formascute becomes a reusable characterization framework that any
 institution can point at an HPC cluster to understand workflow behavior
 before running production-scale scientific analyses.

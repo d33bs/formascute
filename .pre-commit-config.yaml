@@ -1,0 +1,8 @@
+repos:
+  - repo: local
+    hooks:
+      - id: formascute-check
+        name: formascute repository check
+        entry: bash bin/formascute check
+        language: system
+        pass_filenames: false
