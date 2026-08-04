@@ -13,24 +13,29 @@ Usage:
   bin/formascute preflight [--run-id ID] [--account NAME] [--partition NAME] [--qos NAME]
   bin/formascute run-local-smoke [--run-id ID]
   bin/formascute run EXPERIMENT [--profile PROFILE] [--run-id ID] [--items N] [--batch-size N] [--account NAME] [--partition NAME] [--qos NAME]
-  bin/formascute submit EXPERIMENT [--run-id ID] [--items N] [--batch-size N] [--account NAME] [--partition NAME] [--qos NAME] [--dry-run]
+  bin/formascute submit EXPERIMENT [--run-id ID] [--items N] [--batch-size N] [--account NAME] [--partition NAME] [--qos NAME] [--submit-host HOST] [--dry-run]
 
 Examples:
   bin/formascute doctor
   bin/formascute check
-  bin/formascute preflight --account amc-general
+  bin/formascute preflight --account <allocation>
   bin/formascute run-local-smoke
   bin/formascute run independent_jobs --profile alpine --items 16
   bin/formascute run batched_jobs --profile alpine --items 16 --batch-size 4
-  bin/formascute submit independent_jobs --items 16 --account amc-general
+  bin/formascute submit independent_jobs --items 16 --account <allocation>
 
 Experiments:
   independent_jobs
   batched_jobs
   queue_size_20
+  nf1_minimal_overhead
   nf1_featurization_independent
+  nf1_featurization_batched_2
   nf1_featurization_batched
+  nf1_queue_size_4
   nf1_queue_size_20
+  nf1_submit_rate_4
+  zp_synthetic_features
 
 Options:
   EXPERIMENT       Experiment config name from conf/experiments without .config.
@@ -39,12 +44,15 @@ Options:
   --items          Number of synthetic work items. Default: 16.
   --batch-size     Work items per Nextflow task. Default: 1, 8 for batched_jobs, or 4 for nf1_featurization_batched.
   --account        Slurm account/allocation. Default: FORMASCUTE_ACCOUNT or none.
-  --partition      Slurm partition. Default: FORMASCUTE_PARTITION or amilan.
-  --qos            Slurm QoS. Default: FORMASCUTE_QOS or normal.
+  --partition      Slurm partition. Default: FORMASCUTE_PARTITION or acpu.
+  --qos            Slurm QoS. Default: FORMASCUTE_QOS or cpu-normal.
+  --submit-host    Optional SSH host used to run sbatch. Example: Persistence1.
 
 Environment:
-  FORMASCUTE_NEXTFLOW_MODULE    Module loaded by generated Slurm scripts. Default: nextflow.
-  FORMASCUTE_CONTAINER_MODULE   Module loaded by generated Slurm scripts. Default: singularity.
+  FORMASCUTE_NEXTFLOW_MODULE    Module loaded by generated Slurm scripts. Default: nextflow/25.10.2.
+  FORMASCUTE_CONTAINER_MODULE   Optional container module loaded by generated Slurm scripts.
+  FORMASCUTE_ENABLE_CONTAINER   Enable Nextflow Singularity support. Default: false.
+  FORMASCUTE_ENV_DIR            Repo-local bootstrap environment. Default: .formascute/conda.
   FORMASCUTE_SCRATCH            Shared scratch root. Default: /scratch/alpine/$USER.
   FORMASCUTE_PROJECT            Project root for caches. Default: /projects/$USER.
 USAGE
@@ -96,16 +104,24 @@ check_repo() {
   local failed=0
   local required=(
     "Makefile"
+    "CITATION.cff"
+    "CODE_OF_CONDUCT.md"
+    "CONTRIBUTING.md"
+    "AGENTS.md"
+    ".agents/skills/alpine.md"
     ".markdownlint-cli2.yaml"
     "nextflow.config"
     "conf/alpine.reference.config"
     "conf/characterization.config"
+    "scripts/bootstrap"
     "scripts/check"
     "scripts/lint"
     "workflows/synthetic.nf"
     "docs/hpc-quickstart.md"
     "docs/production-checklist.md"
+    "docs/alpine-findings.md"
     "docs/nf1-pipeline-target.md"
+    "docs/north-star.md"
   )
 
   echo "formascute repository check"
@@ -286,6 +302,13 @@ doctor() {
     echo "nextflow: missing"
   fi
 
+  local env_dir="${FORMASCUTE_ENV_DIR:-$ROOT_DIR/.formascute/conda}"
+  if [[ -x "$env_dir/bin/nextflow" ]]; then
+    echo "bootstrap_nextflow: $env_dir/bin/nextflow"
+  else
+    echo "bootstrap_nextflow: missing"
+  fi
+
   if have sbatch; then
     echo "sbatch: $(command -v sbatch)"
   else
@@ -380,6 +403,7 @@ submit_slurm() {
   local partition="$6"
   local qos="$7"
   local dry_run="$8"
+  local submit_host="$9"
   local outdir="$ROOT_DIR/results/$id"
   local script="$outdir/coordinator.sbatch"
   local experiment_config="$ROOT_DIR/conf/experiments/${experiment}.config"
@@ -391,6 +415,7 @@ submit_slurm() {
   validate_name "account" "$account"
   validate_name "partition" "$partition"
   validate_name "qos" "$qos"
+  validate_name "submit-host" "$submit_host"
   validate_positive_int "items" "$items" 256
   validate_positive_int "batch-size" "$batch_size" 64
 
@@ -399,8 +424,13 @@ submit_slurm() {
     exit 2
   fi
 
-  if [[ "$dry_run" != "true" ]] && ! have sbatch; then
+  if [[ "$dry_run" != "true" && -z "$submit_host" ]] && ! have sbatch; then
     echo "sbatch is required for submit" >&2
+    exit 127
+  fi
+
+  if [[ "$dry_run" != "true" && -n "$submit_host" ]] && ! have ssh; then
+    echo "ssh is required when --submit-host is used" >&2
     exit 127
   fi
 
@@ -432,10 +462,18 @@ set -euo pipefail
 
 cd "$ROOT_DIR"
 
-if type module >/dev/null 2>&1; then
+FORMASCUTE_ENV_DIR="\${FORMASCUTE_ENV_DIR:-$ROOT_DIR/.formascute/conda}"
+if [[ -f "\$FORMASCUTE_ENV_DIR/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "\$FORMASCUTE_ENV_DIR/bin/activate"
+elif type module >/dev/null 2>&1; then
   module purge
-  module load "\${FORMASCUTE_NEXTFLOW_MODULE:-nextflow}"
-  module load "\${FORMASCUTE_CONTAINER_MODULE:-singularity}"
+  if [[ -n "\${FORMASCUTE_NEXTFLOW_MODULE:-nextflow/25.10.2}" && "\${FORMASCUTE_NEXTFLOW_MODULE:-nextflow/25.10.2}" != "none" ]]; then
+    module load "\${FORMASCUTE_NEXTFLOW_MODULE:-nextflow/25.10.2}"
+  fi
+  if [[ -n "\${FORMASCUTE_CONTAINER_MODULE:-}" && "\${FORMASCUTE_CONTAINER_MODULE:-}" != "none" ]]; then
+    module load "\${FORMASCUTE_CONTAINER_MODULE}"
+  fi
 else
   echo "Environment modules are not available; using commands already on PATH."
 fi
@@ -446,6 +484,9 @@ EOF
 
   if [[ "$dry_run" == "true" ]]; then
     echo "Dry run: not submitting to Slurm" | tee "$outdir/slurm-submit.txt"
+  elif [[ -n "$submit_host" ]]; then
+    # shellcheck disable=SC2029
+    ssh "$submit_host" "cd '$ROOT_DIR' && sbatch '$script'" | tee "$outdir/slurm-submit.txt"
   else
     sbatch "$script" | tee "$outdir/slurm-submit.txt"
   fi
@@ -465,8 +506,8 @@ case "$cmd" in
   preflight)
     id="$(run_id)"
     account="${FORMASCUTE_ACCOUNT:-}"
-    partition="${FORMASCUTE_PARTITION:-amilan}"
-    qos="${FORMASCUTE_QOS:-normal}"
+    partition="${FORMASCUTE_PARTITION:-acpu}"
+    qos="${FORMASCUTE_QOS:-cpu-normal}"
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --run-id) id="$2"; shift 2 ;;
@@ -502,10 +543,11 @@ case "$cmd" in
     id="$(run_id)"
     items=16
     account="${FORMASCUTE_ACCOUNT:-}"
-    partition="${FORMASCUTE_PARTITION:-amilan}"
-    qos="${FORMASCUTE_QOS:-normal}"
+    partition="${FORMASCUTE_PARTITION:-acpu}"
+    qos="${FORMASCUTE_QOS:-cpu-normal}"
     case "$experiment" in
       batched_jobs) batch_size=8 ;;
+      nf1_featurization_batched_2) batch_size=2 ;;
       nf1_featurization_batched) batch_size=4 ;;
       *) batch_size=1 ;;
     esac
@@ -537,11 +579,13 @@ case "$cmd" in
     id="$(run_id)"
     items=16
     account="${FORMASCUTE_ACCOUNT:-}"
-    partition="${FORMASCUTE_PARTITION:-amilan}"
-    qos="${FORMASCUTE_QOS:-normal}"
+    partition="${FORMASCUTE_PARTITION:-acpu}"
+    qos="${FORMASCUTE_QOS:-cpu-normal}"
     dry_run="false"
+    submit_host="${FORMASCUTE_SUBMIT_HOST:-}"
     case "$experiment" in
       batched_jobs) batch_size=8 ;;
+      nf1_featurization_batched_2) batch_size=2 ;;
       nf1_featurization_batched) batch_size=4 ;;
       *) batch_size=1 ;;
     esac
@@ -554,13 +598,14 @@ case "$cmd" in
         --account) account="$2"; shift 2 ;;
         --partition) partition="$2"; shift 2 ;;
         --qos) qos="$2"; shift 2 ;;
+        --submit-host) submit_host="$2"; shift 2 ;;
         --dry-run) dry_run="true"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
       esac
     done
 
-    submit_slurm "$experiment" "$id" "$items" "$batch_size" "$account" "$partition" "$qos" "$dry_run"
+    submit_slurm "$experiment" "$id" "$items" "$batch_size" "$account" "$partition" "$qos" "$dry_run" "$submit_host"
     ;;
   -h|--help|"")
     usage

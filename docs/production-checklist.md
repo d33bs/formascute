@@ -7,8 +7,6 @@ Use this checklist before increasing run size on an HPC system.
 ```bash
 git clone <repo-url> formascute
 cd formascute
-module load nextflow
-module load singularity
 make check
 make doctor
 make preflight ACCOUNT=<allocation>
@@ -27,12 +25,19 @@ Confirm:
 - `results/<run-id>/coordinator.sbatch` from `submit-dry-run` has the expected
   Slurm directives.
 
+Expected Alpine defaults:
+
+- partition: `acpu`
+- QoS: `cpu-normal`
+- Nextflow module: `nextflow/25.10.2`
+- submit host: `Persistence1`
+
 ## First Scheduler Run
 
 Submit the smallest Slurm-backed experiment:
 
 ```bash
-make submit EXPERIMENT=independent_jobs ITEMS=4 ACCOUNT=<allocation>
+make submit EXPERIMENT=independent_jobs ITEMS=4 ACCOUNT=<allocation> SUBMIT_HOST=Persistence1
 ```
 
 Review the run directory after completion.
@@ -50,13 +55,14 @@ Confirm:
 
 Increase only one setting at a time. Prefer this sequence:
 
-1. `ITEMS=4`
-2. `ITEMS=16`
-3. `ITEMS=32`
-4. `EXPERIMENT=batched_jobs ITEMS=16 BATCH_SIZE=4`
-5. `EXPERIMENT=queue_size_20 ITEMS=16`
-6. `EXPERIMENT=nf1_featurization_independent ITEMS=16`
-7. `EXPERIMENT=nf1_featurization_batched ITEMS=16 BATCH_SIZE=4`
+1. `EXPERIMENT=nf1_minimal_overhead ITEMS=1`
+2. `EXPERIMENT=nf1_featurization_independent ITEMS=4`
+3. `EXPERIMENT=nf1_featurization_independent ITEMS=16`
+4. `EXPERIMENT=nf1_featurization_batched_2 ITEMS=16 BATCH_SIZE=2`
+5. `EXPERIMENT=nf1_featurization_batched ITEMS=16 BATCH_SIZE=4`
+6. `EXPERIMENT=nf1_queue_size_4 ITEMS=16`
+7. `EXPERIMENT=nf1_queue_size_20 ITEMS=16`
+8. `EXPERIMENT=nf1_submit_rate_4 ITEMS=16`
 
 Stop and review artifacts whenever validation fails, retry behavior appears, or
 queue wait differs from expectations.

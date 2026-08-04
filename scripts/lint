@@ -11,12 +11,12 @@ echo "shell syntax"
 while IFS= read -r path; do
   bash -n "$path"
   echo "ok: ${path#"$ROOT_DIR"/}"
-done < <(find "$ROOT_DIR" -path "$ROOT_DIR/.git" -prune -o -type f -name '*.sh' -print; printf '%s\n' "$ROOT_DIR/bin/formascute" "$ROOT_DIR/scripts/check" "$ROOT_DIR/scripts/lint")
+done < <(find "$ROOT_DIR" -path "$ROOT_DIR/.git" -prune -o -type f -name '*.sh' -print; printf '%s\n' "$ROOT_DIR/bin/formascute" "$ROOT_DIR/scripts/bootstrap" "$ROOT_DIR/scripts/check" "$ROOT_DIR/scripts/lint")
 
 echo
 echo "shellcheck"
 if have shellcheck; then
-  shellcheck "$ROOT_DIR/bin/formascute" "$ROOT_DIR/scripts/check" "$ROOT_DIR/scripts/lint"
+  shellcheck "$ROOT_DIR/bin/formascute" "$ROOT_DIR/scripts/bootstrap" "$ROOT_DIR/scripts/check" "$ROOT_DIR/scripts/lint"
   while IFS= read -r path; do
     shellcheck "$path"
   done < <(find "$ROOT_DIR" -path "$ROOT_DIR/.git" -prune -o -type f -name '*.sh' -print)

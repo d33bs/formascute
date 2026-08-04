@@ -184,6 +184,7 @@ cython_debug/
 # Nextflow and FormaScute run outputs
 .nextflow/
 .nextflow.log*
+.formascute/
 work/
 results/
 

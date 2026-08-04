@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J sarek
 #SBATCH --partition acpu
-#SBATCH --account=amc-general
+#SBATCH --account=<allocation>
 #SBATCH -o log/sarek_%j.out  # Output file with the job ID
 #SBATCH -e log/sarek_%j.err  # Error file with the job ID
 #SBATCH -t 24:00:00   # Set the wall time: D-HH:MM:SS
@@ -40,4 +40,3 @@ nextflow run "$pipelinepath"  -ansi-log false \
 	--save_trimmed --save_mapped --save_output_as_bam --outdir "$pipeoutdir" \
 	--tools mutect2,strelka,tiddit,freebayes,vep,snpeff -resume \
 	-c curc_alpine.config,fastp.config
-

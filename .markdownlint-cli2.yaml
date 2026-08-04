@@ -3,5 +3,6 @@ config:
   MD033: false
 globs:
   - "*.md"
+  - ".agents/**/*.md"
   - "docs/**/*.md"
   - ".github/**/*.md"
