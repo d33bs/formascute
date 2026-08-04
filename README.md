@@ -22,7 +22,6 @@ From the repository root:
 
 ```bash
 make check
-make prek
 make doctor
 make smoke
 ```
@@ -46,7 +45,8 @@ Preflight output is written to `results/<run-id>/preflight/`.
 
 - `make check`: verify the cloned repository has the expected local files and a
   writable `results/` directory.
-- `make prek`: run the same local check configuration used by pull request CI.
+- `make lint`: run shell, Markdown, and best-effort Nextflow lint checks.
+- `make prek`: run the same lint configuration used by pull request CI.
 - `make doctor`: show available runtime tools.
 - `make preflight ACCOUNT=amc-general`: record Slurm, module, filesystem, and
   runtime context without submitting work.

@@ -11,6 +11,11 @@
 
 set -euo pipefail
 
+: "${scrproj:?Set scrproj to the scratch project directory}"
+: "${pipelinepath:?Set pipelinepath to the Nextflow pipeline path}"
+: "${samplefile:?Set samplefile to the Sarek sample sheet}"
+: "${pipeoutdir:?Set pipeoutdir to the pipeline output directory}"
+
 # make software accessible:
 module load nextflow/23.04
 module load singularity/3.7.4
@@ -35,5 +40,4 @@ nextflow run "$pipelinepath"  -ansi-log false \
 	--save_trimmed --save_mapped --save_output_as_bam --outdir "$pipeoutdir" \
 	--tools mutect2,strelka,tiddit,freebayes,vep,snpeff -resume \
 	-c curc_alpine.config,fastp.config
-
 

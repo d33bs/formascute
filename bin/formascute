@@ -96,9 +96,12 @@ check_repo() {
   local failed=0
   local required=(
     "Makefile"
+    ".markdownlint-cli2.yaml"
     "nextflow.config"
     "conf/alpine.reference.config"
     "conf/characterization.config"
+    "scripts/check"
+    "scripts/lint"
     "workflows/synthetic.nf"
     "docs/hpc-quickstart.md"
     "docs/production-checklist.md"

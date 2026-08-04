@@ -20,12 +20,13 @@ ifneq ($(strip $(BATCH_SIZE)),)
 ARGS += --batch-size $(BATCH_SIZE)
 endif
 
-.PHONY: help check prek doctor preflight smoke run submit submit-dry-run list-experiments
+.PHONY: help check lint prek doctor preflight smoke run submit submit-dry-run list-experiments
 
 help:
 	@bash bin/formascute --help
 	@printf '\nMake targets:\n'
 	@printf '  make check\n'
+	@printf '  make lint\n'
 	@printf '  make prek\n'
 	@printf '  make doctor\n'
 	@printf '  make preflight ACCOUNT=amc-general\n'
@@ -50,7 +51,10 @@ help:
 	@printf '  FORMASCUTE_PROJECT            Project/cache root; default /projects/$$USER\n'
 
 check:
-	@bash bin/formascute check
+	@bash scripts/check
+
+lint:
+	@bash scripts/lint
 
 prek:
 	@if command -v prek >/dev/null 2>&1; then \

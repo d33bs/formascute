@@ -10,7 +10,6 @@ cd formascute
 module load nextflow
 module load singularity
 make check
-make prek
 make doctor
 make preflight ACCOUNT=<allocation>
 make submit-dry-run EXPERIMENT=nf1_featurization_independent ITEMS=16 ACCOUNT=<allocation>
