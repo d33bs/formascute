@@ -1,6 +1,26 @@
 # Alpine Skill
 
-Use this note before testing formascute on CURC Alpine.
+Use this note before changing, testing, or scaling formascute on CURC Alpine,
+especially for Nextflow, Slurm submission, `Persistence1`, ZedProfiler, or
+runtime environment behavior.
+
+## Current Position
+
+- Submit and orchestrate through `Persistence1`; treat this as selected project
+  policy, not an open question.
+- Keep compute work on Slurm. `Persistence1` is for the long-lived workflow
+  manager, not image processing or other heavy work.
+- Use `queueSize = 200` as the conservative production default. This aligns with
+  the reported campus/user active-job limit.
+- Do not use `queueSize > 1000`. Treat `1000` as a stress-test ceiling, not a
+  normal operating value.
+- Prefer moderate batching before aggressive submit throttling. For imaging
+  work, batch by data locality so each task loads an image set once and emits
+  validated outputs.
+- Prefer the validated project-owned `uv` environment for ZedProfiler work unless
+  real production runs show a concrete reason to switch runtime strategy.
+- Monitor the Nextflow orchestrator on `Persistence1`; its memory use may be the
+  practical scaling limit before Slurm submission becomes the bottleneck.
 
 ## Connection
 
@@ -13,17 +33,89 @@ zsh -lic 'ssh-alpine "hostname; pwd"'
 The alias should be defined in the user's shell configuration as an SSH command
 to `login.rc.colorado.edu` using that user's Alpine SSH key.
 
-`Persistence1` is not directly resolvable from the local machine. It is reachable
-from the Alpine login node:
+`Persistence1` is not directly resolvable from the local machine. Reach it from
+the Alpine login node:
 
 ```bash
 zsh -lic 'ssh-alpine "ssh Persistence1 hostname"'
 ```
 
-## Module Behavior
+For real runs, use `tmux` or `screen` on `Persistence1` so the workflow manager
+survives SSH disconnects.
+
+## Downtime Awareness
+
+Before debugging failed Alpine SSH, module, Slurm, or filesystem behavior, check
+whether the date is near CURC planned maintenance.
+
+CURC policy says the first Wednesday of each month is reserved for planned
+maintenance. CURC resources, including compute clusters, filesystems, and
+servers, may be unavailable. A CURC course-support page describes the practical
+first-Wednesday window as roughly `7a-5p`; the status page is authoritative for
+the actual current window because CURC can cancel, move, or extend maintenance.
+
+Check the live status page first:
+
+```bash
+curl -fsSL https://curc.statuspage.io/api/v2/summary.json
+```
+
+Useful fields to inspect:
+
+- top-level `status.indicator`; expected value during maintenance:
+  `maintenance`
+- `components[]` entry named `Alpine`; expected status during downtime:
+  `under_maintenance`
+- `scheduled_maintenances[]`; look for an `in_progress` or `scheduled` event
+  affecting Alpine, Research Computing Core, PetaLibrary, or Open OnDemand
+- `scheduled_for` and `scheduled_until`; use these exact timestamps over the
+  rough first-Wednesday rule
+
+Actual maintenance-day probe on `2026-08-05`, the first Wednesday of August
+2026:
+
+- status page updated at `2026-08-05T06:30:07-06:00`
+- top-level status was `maintenance`
+- Alpine, Research Computing Core, Blanca, PetaLibrary, and Open OnDemand were
+  `under_maintenance`
+- the scheduled maintenance entry said affected services would be unavailable
+- `ssh-alpine "date; hostname; pwd"` still reached login node `login-ci3`
+- `ssh-alpine "ssh Persistence1 'date; hostname; pwd'"` still reached
+  `persistence1`
+- `module load nextflow/25.10.2 && nextflow -version` still worked on
+  `Persistence1`
+- `sinfo` still showed partitions such as `acpu` as `up`, so `sinfo` alone is
+  not sufficient to rule out maintenance
+- `scontrol show reservation` showed active `pm-8.5-*` reservations from
+  `2026-08-05T06:30:00` to `2026-08-06T06:30:00` with `Flags=MAINT` across CPU,
+  GPU, compile, testing, and DTN partitions
+- `sbatch --test-only` did not submit and returned policy/transition messages
+  during this window, including the `amilan` to `acpu` and `normal` to
+  `cpu-normal` rename notices, plus `allocation failure: Invalid qos
+  specification`
+
+Interpretation: maintenance does not necessarily mean SSH, `Persistence1`,
+Nextflow modules, or Slurm commands are totally unreachable. Treat the status
+page and `scontrol show reservation` as stronger signals than basic connectivity
+or `sinfo` partition state.
+
+Slurm can also show maintenance before the outage begins. If jobs sit pending
+with reason `ReqNodeNotAvail`, especially in the days leading up to the first
+Wednesday, check maintenance reservations:
+
+```bash
+squeue -u "$USER" --start
+scontrol show reservation
+```
+
+Long walltime jobs may not start if their requested runtime intersects the
+maintenance reservation. Reduce walltime, wait until maintenance completes, or
+resubmit after the status page returns Alpine to `operational`.
+
+## Module And Runtime Facts
 
 The regular Alpine login node did not expose a usable Nextflow module during
-validation. `Persistence1` did expose Nextflow modules:
+validation. `Persistence1` did expose these Nextflow modules:
 
 - `nextflow/22.10.6`
 - `nextflow/23.04`
@@ -38,26 +130,48 @@ nextflow -version
 ```
 
 On `Persistence1`, `/usr/bin/apptainer` and `/usr/bin/singularity` were both
-available and reported Apptainer 1.4.5.
+available and reported Apptainer 1.4.5. Treat this as an available fallback for
+future packaging, not as the preferred current path.
 
 ## Slurm Defaults
 
-Use these defaults for small synthetic CPU tests:
+Use these defaults for CPU work unless the user or CURC gives a newer allocation
+policy:
 
 - account: project allocation supplied by the user
 - partition: `acpu`
 - QoS: `cpu-normal`
 - submit host: `Persistence1`
+- executor: Slurm
+- production `queueSize`: `200`
+- production submit throttle: optional, start around `200 / 60 min` only when
+  real task walltime justifies it
 
 Slurm accepted `acpu` and `cpu-normal` and mapped them to the current CPU
 partition backing the older `amilan`/`normal` names.
 
-`Persistence1` is the selected submission location for this project. Treat it as
-known, not as an open question.
+Keep CPU and GPU work separated into different profiles or runs.
 
-## Validated Submission Path
+## Production Submission Shape
 
-From a clone on Alpine shared scratch:
+For production-scale workflow execution, prefer a direct `Persistence1` run in
+`tmux` or `screen`. From the Alpine login node:
+
+```bash
+ssh Persistence1
+tmux new -s formascute
+cd /scratch/alpine/$USER/formascute-codex-test
+module load nextflow/25.10.2
+make preflight ACCOUNT=<allocation>
+make run EXPERIMENT=<experiment> ITEMS=<n> ACCOUNT=<allocation> PROFILE=alpine RUN_ID=<run-id>
+```
+
+Use the generated `make submit ... SUBMIT_HOST=Persistence1` path for small smoke
+tests and repository validation. Be cautious about making the Slurm coordinator
+job the long-term UX because CURC positions `Persistence1` as the place to run
+long-lived workflow managers directly.
+
+Validated smoke path from a clone on Alpine shared scratch:
 
 ```bash
 make check
@@ -66,7 +180,7 @@ make submit-dry-run EXPERIMENT=nf1_featurization_independent ITEMS=4 ACCOUNT=<al
 make submit EXPERIMENT=nf1_featurization_independent ITEMS=4 ACCOUNT=<allocation> SUBMIT_HOST=Persistence1
 ```
 
-The successful validation run used:
+Successful validation run:
 
 ```bash
 make submit EXPERIMENT=nf1_featurization_independent ITEMS=4 ACCOUNT=<allocation> SUBMIT_HOST=Persistence1 RUN_ID=remote-smoke-persistence
@@ -79,6 +193,54 @@ Observed result:
 - `validation.json` reported `"valid": true`
 - `trace.tsv` contained native Slurm job IDs
 - `slurm.tsv` was collected
+
+## Orchestrator Monitoring
+
+Treat the Nextflow process on `Persistence1` as a constrained service.
+
+Known `Persistence1` guidance received for this project:
+
+- VM size: 8 cores and 8 GB RAM
+- individual user cgroups: about 20% of total RAM and 80% of CPU
+- the orchestrator may be cancelled if it exceeds RAM limits for too long
+
+During real runs, monitor the user's processes:
+
+```bash
+htop -u "$USER"
+top -u "$USER"
+squeue -u "$USER"
+```
+
+Recommended implementation direction:
+
+- capture or periodically log Nextflow/orchestrator RSS during larger runs
+- keep the Nextflow JVM heap conservative, for example via `NXF_OPTS`, then tune
+  from observed memory rather than guessing
+- make preflight report host, loaded Nextflow, Python runtime, active job
+  count, and suggested monitoring commands
+
+## Queue And Batching Policy
+
+The reported Alpine active-job limit for the campus/user context is 200 jobs.
+`queueSize = 1000` may be accepted by Nextflow, but Slurm will likely run only
+about 200 jobs at once and leave the rest pending.
+
+Use this order of operations when optimizing:
+
+1. First make the process granularity sensible.
+2. Batch small imaging tasks by image set, plate, well group, or compatible
+   feature family.
+3. Keep `queueSize = 200` for initial production runs.
+4. Add `submitRateLimit = '200 / 60 min'` only if the scheduler or CURC guidance
+   indicates submit-rate pressure.
+5. Adjust the rate window to match observed task walltime.
+6. Test higher queue sizes only with explicit measurement and avoid anything
+   above `1000`.
+
+For NF1/ZedProfiler-style imaging, target tasks that are large enough to amortize
+image I/O and Slurm overhead. The exact batch size should come from `trace.tsv`,
+`slurm.tsv`, output validation, and image I/O behavior on real data.
 
 ## Synthetic Experiment Findings
 
@@ -101,14 +263,15 @@ Interpretation:
   when submitted through `Persistence1`.
 - Batching reduced Slurm job count and modestly improved elapsed time in tiny
   synthetic tests.
-- Batch sizes 2-4 are the first batching range to consider.
-- Use `queueSize` before `submitRateLimit` for scheduler pressure control.
-- Keep CPU and GPU work separated into different profiles or runs.
+- Batch sizes 2-4 are the first synthetic batching range to consider, but real
+  imaging data should drive the production batch shape.
+- Use `queueSize` before `submitRateLimit` for scheduler pressure control unless
+  CURC explicitly asks for rate limiting.
 
 For NF1 orchestration, prefer a thin Nextflow layer around the existing Stage 3
 work list and feature scripts before rewriting processing code.
 
-## ZedProfiler Notes
+## ZedProfiler Runtime
 
 The `zp_synthetic_features` experiment completed successfully on Alpine through
 `Persistence1`:
@@ -140,12 +303,13 @@ ZedProfiler:
 - missing `pyarrow`
 - missing `zedprofiler`
 
-Real ZedProfiler work needs a project-owned Python 3.11+ environment or an
-Apptainer image. For NF1, prefer grouping compatible ZedProfiler feature families
-by image-set when possible so each task loads image data once and writes validated
-outputs.
+Real ZedProfiler work needs a project-owned Python 3.11+ environment. The
+validated `uv` path satisfies that requirement today. Consider an
+Apptainer/Singularity image only if `uv` becomes hard to reproduce across users,
+the dependency set stops resolving cleanly, or CURC/project policy requires a
+container artifact.
 
-## uv For ZedProfiler
+## uv Prototype Path
 
 CURC documents a `uv` module for Python environments. The documented flow is:
 
@@ -169,6 +333,7 @@ export UV_HOME="/projects/$USER/software/uv"
 export UV_INSTALL_DIR="$UV_HOME/bin"
 export UV_ENVS="$UV_HOME/envs"
 export UV_CACHE_DIR="/scratch/alpine/$USER/uv-cache"
+export UV_LINK_MODE=copy
 export PATH="$UV_INSTALL_DIR:$PATH"
 mkdir -p "$UV_INSTALL_DIR" "$UV_ENVS" "$UV_CACHE_DIR"
 
@@ -187,17 +352,6 @@ print(zedprofiler.__file__)
 PY
 ```
 
-Observed validation:
-
-- `uv 0.12.1` installed under `/projects/$USER/software/uv/bin`
-- `uv venv --python 3.12` used `/usr/bin/python3.12`
-- ZedProfiler `0.1.1` installed and imported
-- heavy dependencies resolved as wheels, including `mahotas`, `pyarrow`,
-  `numpy`, `pandas`, and `scikit-image`
-- with `UV_CACHE_DIR` on scratch and the env under `/projects`, `uv` warned
-  that hardlinking was not available and fell back to copying; set
-  `UV_LINK_MODE=copy` to make that explicit
-
 Validated simple experiment using the `uv` environment:
 
 ```bash
@@ -206,6 +360,16 @@ module load nextflow/25.10.2
 source "/projects/$USER/software/uv/envs/zedprofiler-simple/bin/activate"
 make run EXPERIMENT=zp_synthetic_features ITEMS=4 ACCOUNT=amc-general PROFILE=alpine RUN_ID=zp-sim-uv-01
 ```
+
+Observed `uv` environment validation:
+
+- `uv 0.12.1` installed under `/projects/$USER/software/uv/bin`
+- `uv venv --python 3.12` used `/usr/bin/python3.12`
+- ZedProfiler `0.1.1` installed and imported
+- heavy dependencies resolved as wheels, including `mahotas`, `pyarrow`,
+  `numpy`, `pandas`, and `scikit-image`
+- with `UV_CACHE_DIR` on scratch and the env under `/projects`, hardlinking was
+  not available, so `UV_LINK_MODE=copy` should be set explicitly
 
 Observed result:
 
@@ -224,18 +388,43 @@ currently treats `FORMASCUTE_ENV_DIR` as a replacement environment and skips
 module loading when it exists, so it is not yet the right interface for a
 combined Nextflow-module plus `uv` Python environment.
 
-## Important Failure Mode
+## Runtime Direction
 
-Submitting directly from the regular Alpine login node failed because the batch
-job could not load `nextflow/25.10.2`. Use `SUBMIT_HOST=Persistence1` unless the
-module environment changes.
+For current Alpine work, prioritize the validated `uv` runtime:
 
-## CURC Questions To Preserve
+- keep the environment under `/projects/$USER/software/uv/envs`
+- keep the cache under `/scratch/alpine/$USER/uv-cache`
+- set `UV_LINK_MODE=copy`
+- record the Python version, `uv` version, package versions, and Nextflow version
+  in run manifests
+- add import smoke checks for ZedProfiler and scientific imaging dependencies
 
-Ask CURC before scaling:
+Apptainer/Singularity remains a possible later packaging option, but do not push
+the project toward it by default. The present evidence favors `uv` because it has
+already worked on Alpine for Python 3.12 and ZedProfiler dependency resolution.
 
-- What `queueSize` range is recommended for Nextflow on Alpine?
-- Should small NF1-style jobs use moderate independent submission or batching?
-- Are Slurm job arrays recommended, or is Nextflow-managed submission preferred
-  for retries and accounting?
-- Should SAMMed3D GPU work be a separate Nextflow profile and submission path?
+## Important Failure Modes
+
+- Submitting directly from the regular Alpine login node failed because the batch
+  job could not load `nextflow/25.10.2`. Use `Persistence1` unless the module
+  environment changes.
+- Do not rely on the base `Persistence1` Python environment for real ZedProfiler.
+- Do not let the orchestrator perform image processing directly on
+  `Persistence1`.
+- Do not assume a large Nextflow `queueSize` increases active Slurm concurrency
+  beyond the site/user limit.
+- Do not raise submit rate or queue size without checking orchestrator RSS and
+  Slurm accounting first.
+
+## Questions To Revisit With CURC
+
+Revisit these after real imaging traces exist:
+
+- Does the 200 active-job limit apply exactly to this allocation and user group?
+- Is `submitRateLimit = '200 / 60 min'` appropriate for the observed task
+  duration, or should the window be shorter or longer?
+- Does CURC prefer Nextflow-managed tasks over Slurm arrays for this workflow
+  once retries, accounting, and output validation are considered?
+- Should SAMMed3D GPU work use a separate profile, partition, QoS, and runtime?
+- What orchestrator RSS range is acceptable for multi-day runs on
+  `Persistence1`?
