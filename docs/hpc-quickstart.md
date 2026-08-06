@@ -58,6 +58,16 @@ Initial experiments:
 - `nf1_queue_size_4`: NF1-like independent work with a very small queue size.
 - `nf1_queue_size_20`: NF1-like independent work with a conservative queue size.
 - `nf1_submit_rate_4`: NF1-like independent work with slow submission rate.
+- `nf1_submit_rate_prod_ratio`: NF1-like independent work at the exact CURC-
+  suggested production shape (`queueSize=200`, `submitRateLimit='200 / 60 min'`).
+  Confirms the rate limiter paces every submission from job 1, not just once
+  near the 200-job ceiling; see `docs/alpine-findings.md`.
+- `zp_apptainer_probe`: same synthetic workload as `zp_synthetic_features`, but
+  routed through a project-owned Apptainer image with the same dependency set
+  as the validated `uv` environment. Requires
+  `FORMASCUTE_ENABLE_CONTAINER=true` and a pre-built
+  `/projects/$USER/software/apptainer/zedprofiler.sif`; see
+  `docs/alpine-findings.md` for the build recipe and the `procps` gotcha.
 
 Run examples:
 
@@ -70,6 +80,7 @@ make submit EXPERIMENT=nf1_featurization_batched_2 ITEMS=16 BATCH_SIZE=2 ACCOUNT
 make submit EXPERIMENT=nf1_featurization_batched ITEMS=16 BATCH_SIZE=4 ACCOUNT=<allocation> SUBMIT_HOST=Persistence1
 make submit EXPERIMENT=nf1_queue_size_4 ITEMS=16 ACCOUNT=<allocation> SUBMIT_HOST=Persistence1
 make submit EXPERIMENT=nf1_submit_rate_4 ITEMS=16 ACCOUNT=<allocation> SUBMIT_HOST=Persistence1
+make submit EXPERIMENT=nf1_submit_rate_prod_ratio ITEMS=16 ACCOUNT=<allocation> SUBMIT_HOST=Persistence1
 make run EXPERIMENT=independent_jobs ITEMS=32
 make run EXPERIMENT=batched_jobs ITEMS=16 BATCH_SIZE=4
 make run EXPERIMENT=queue_size_20 ITEMS=32

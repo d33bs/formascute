@@ -18,11 +18,24 @@ runtime environment behavior.
   work, batch by data locality so each task loads an image set once and emits
   validated outputs.
 - Prefer the validated project-owned `uv` environment for ZedProfiler work unless
-  real production runs show a concrete reason to switch runtime strategy.
+  real production runs show a concrete reason to switch runtime strategy. CURC's
+  contact expressed a reproducibility preference for Apptainer/Singularity over
+  `uv`/conda for this shared project; a minimal Apptainer smoke test now backs
+  that path too (see ZedProfiler Runtime), so re-evaluate before committing hard
+  to `uv` for the production environment.
 - Monitor the Nextflow orchestrator on `Persistence1`; its memory use may be the
-  practical scaling limit before Slurm submission becomes the bottleneck.
+  practical scaling limit before Slurm submission becomes the bottleneck. The
+  exact cap is now confirmed by direct cgroup inspection, not just guidance: see
+  Orchestrator Monitoring.
+- `submitRateLimit` paces submissions at a constant rate starting from the very
+  first job, regardless of total item count or `queueSize` headroom. It is not
+  dormant just because the run is far below the job-count ceiling. Confirmed by
+  experiment: see Queue And Batching Policy.
 
 ## Connection
+
+*Scope: general Alpine/`Persistence1` access. Applies whether or not Nextflow
+is involved.*
 
 From the local machine, use the `ssh-alpine` zsh alias:
 
@@ -44,6 +57,8 @@ For real runs, use `tmux` or `screen` on `Persistence1` so the workflow manager
 survives SSH disconnects.
 
 ## Downtime Awareness
+
+*Scope: general Alpine usage. Applies whether or not Nextflow is involved.*
 
 Before debugging failed Alpine SSH, module, Slurm, or filesystem behavior, check
 whether the date is near CURC planned maintenance.
@@ -112,7 +127,9 @@ Long walltime jobs may not start if their requested runtime intersects the
 maintenance reservation. Reduce walltime, wait until maintenance completes, or
 resubmit after the status page returns Alpine to `operational`.
 
-## Module And Runtime Facts
+## Nextflow Module
+
+*Scope: when using Nextflow.*
 
 The regular Alpine login node did not expose a usable Nextflow module during
 validation. `Persistence1` did expose these Nextflow modules:
@@ -129,11 +146,24 @@ module load nextflow/25.10.2
 nextflow -version
 ```
 
-On `Persistence1`, `/usr/bin/apptainer` and `/usr/bin/singularity` were both
-available and reported Apptainer 1.4.5. Treat this as an available fallback for
-future packaging, not as the preferred current path.
+## Container Runtime Binaries
+
+*Scope: general — applies whether or not Nextflow is orchestrating the
+container. `apptainer`/`singularity` are plain system binaries here, not
+modules.*
+
+On `Persistence1` and on `acpu` compute nodes, `/usr/bin/apptainer` and
+`/usr/bin/singularity` are both available (Apptainer `1.4.5`), with no `module
+load` step required. This holds for direct `apptainer build`/`apptainer exec`
+usage (see ZedProfiler Runtime below) as much as for Nextflow-orchestrated
+container tasks.
 
 ## Slurm Defaults
+
+*Scope: `account`/`partition`/`QoS`/`submit host` are general Slurm settings —
+they apply to any job on Alpine, including a plain `sbatch` script with no
+Nextflow involved. `executor`, `queueSize`, and the submit throttle are
+Nextflow executor settings and only mean something when using Nextflow.*
 
 Use these defaults for CPU work unless the user or CURC gives a newer allocation
 policy:
@@ -142,17 +172,38 @@ policy:
 - partition: `acpu`
 - QoS: `cpu-normal`
 - submit host: `Persistence1`
-- executor: Slurm
-- production `queueSize`: `200`
+- executor: Slurm *(Nextflow only)*
+- production `queueSize`: `200` *(Nextflow only)*
 - production submit throttle: optional, start around `200 / 60 min` only when
-  real task walltime justifies it
+  real task walltime justifies it *(Nextflow only)*
 
 Slurm accepted `acpu` and `cpu-normal` and mapped them to the current CPU
 partition backing the older `amilan`/`normal` names.
 
 Keep CPU and GPU work separated into different profiles or runs.
 
+**Per-task memory/CPU allocation, confirmed on `2026-08-06` (Nextflow-only).**
+`nextflow.config`/`conf/alpine.reference.config` set no `process.memory` or
+`process.cpus` for `CHARACTERIZE_ITEM`, so every Nextflow task submitted so far
+has silently gotten Nextflow's own conservative default. Checked via
+`sacct --format=ReqMem,ReqCPUS,AllocTRES` across several completed jobs:
+
+- every task got exactly `ReqMem=1G`, `ReqCPUS=1`, `AllocTRES=cpu=1,mem=1G,node=1`
+- this is *smaller* than the `acpu` partition's own default: `scontrol show
+  partition acpu` reports `DefMemPerCPU=3840` (MB, i.e. `~3.75 GB` for `1`
+  CPU) — so Nextflow's own default undercuts what a bare `sbatch` with no
+  `--mem` would have gotten
+- this default has been silently fine for every synthetic run so far because
+  none of them approached `1 GB`. It stopped being fine once real ZedProfiler
+  calls were tested — see ZedProfiler Runtime, where a single real image's
+  partial feature extraction hit `~1.01 GB` peak RSS, right at this ceiling.
+
+Set an explicit `process.memory` (and likely `process.cpus`) before any real
+ZedProfiler/NF1 production run; do not rely on Nextflow's default.
+
 ## Production Submission Shape
+
+*Scope: when using Nextflow.*
 
 For production-scale workflow execution, prefer a direct `Persistence1` run in
 `tmux` or `screen`. From the Alpine login node:
@@ -196,6 +247,10 @@ Observed result:
 
 ## Orchestrator Monitoring
 
+*Scope: when using Nextflow (the orchestrator is the Nextflow process). The
+underlying cgroup limits documented below are a general `Persistence1` fact —
+they cap everything a user runs there, Nextflow or not.*
+
 Treat the Nextflow process on `Persistence1` as a constrained service.
 
 Known `Persistence1` guidance received for this project:
@@ -203,6 +258,41 @@ Known `Persistence1` guidance received for this project:
 - VM size: 8 cores and 8 GB RAM
 - individual user cgroups: about 20% of total RAM and 80% of CPU
 - the orchestrator may be cancelled if it exceeds RAM limits for too long
+
+Confirmed directly on `2026-08-06` by reading cgroup and systemd state on
+`Persistence1` (read-only check, no job submitted). The limit is enforced on the
+`user-<uid>.slice`, not on the SSH session scope one level below it, so check the
+slice, not the session:
+
+```bash
+cat /sys/fs/cgroup/memory/user.slice/user-<uid>.slice/memory.limit_in_bytes
+cat /sys/fs/cgroup/cpu,cpuacct/user.slice/user-<uid>.slice/cpu.cfs_quota_us
+cat /sys/fs/cgroup/cpu,cpuacct/user.slice/user-<uid>.slice/cpu.cfs_period_us
+systemctl show user-<uid>.slice -p MemoryLimit -p CPUQuotaPerSecUSec
+```
+
+Observed values:
+
+- host total RAM: `8069439488` bytes (about 7.51 GiB)
+- host CPUs: `8`
+- `memory.limit_in_bytes` on the user slice: `1613885440` bytes, which is
+  exactly `20%` of host RAM (about 1.5 GiB / 1.6 GB)
+- `cpu.cfs_quota_us` / `cpu.cfs_period_us` on the user slice: `640000 / 100000`,
+  i.e. `6.4` of `8` CPUs, exactly `80%`
+- enforced via legacy cgroup v1 fields driven by systemd drop-ins
+  (`.../user-.slice.d/50-CPUQuota.conf`, `.../user-<uid>.slice.d/50-MemoryLimit.conf`),
+  not `MemoryMax`/`MemoryHigh`, which both read `infinity`; check `MemoryLimit`
+  and `CPUQuotaPerSecUSec` specifically, not the newer systemd properties
+- at idle, the user slice's own `MemoryCurrent` was about `8 MB`, far below the
+  `~1.6 GB` cap
+
+This upgrades "monitor RAM, roughly 20%/80%" to a hard, quantified ceiling:
+about `1.6 GB` RAM and `6.4` CPUs for everything the user runs on `Persistence1`,
+including the Nextflow JVM. The earlier `zp_synthetic_features` probe peaked at
+`9-32 MB` RSS per task, only about `1-2%` of the confirmed cap, so tiny synthetic
+runs have not come close to stressing this limit. Real ZedProfiler-scale runs
+should log orchestrator RSS against this `~1.6 GB` number specifically, not the
+VM's full `8 GB`.
 
 During real runs, monitor the user's processes:
 
@@ -221,6 +311,10 @@ Recommended implementation direction:
   count, and suggested monitoring commands
 
 ## Queue And Batching Policy
+
+*Scope: when using Nextflow (`queueSize` and `submitRateLimit` are Nextflow
+executor settings). The underlying 200-job campus/user limit is a Slurm fact
+that applies regardless of orchestration mechanism.*
 
 The reported Alpine active-job limit for the campus/user context is 200 jobs.
 `queueSize = 1000` may be accepted by Nextflow, but Slurm will likely run only
@@ -242,7 +336,34 @@ For NF1/ZedProfiler-style imaging, target tasks that are large enough to amortiz
 image I/O and Slurm overhead. The exact batch size should come from `trace.tsv`,
 `slurm.tsv`, output validation, and image I/O behavior on real data.
 
+CURC's contact suggested `submitRateLimit = '200 / 60 min'` as a companion to
+`queueSize = 200`, with the framing "the rest will go pending" implying it only
+matters once submissions approach the 200 ceiling. An experiment on `2026-08-06`
+(`nf1_submit_rate_prod_ratio`, `queueSize=200`, `submitRateLimit='200 / 60 min'`,
+16 items, well under the ceiling) shows that framing is incomplete:
+
+- individual task submissions landed about 18 seconds apart from the very first
+  job, matching `60 min / 200 = 18s` exactly
+- the coordinator took `5m 10s` for the same 16-item workload that finished in
+  about `51-52s` unthrottled (`nf1_featurization_independent`)
+- validation still passed (`16/16` items, exit `0`), so the setting is safe, just
+  slow
+
+Interpretation: `submitRateLimit` is a steady-rate limiter from job 1, not a
+threshold that only engages once the job count nears the configured limit. For a
+workload of `N` short tasks, it imposes a wall-clock floor of roughly
+`N × (window / rate)`, independent of `queueSize` or actual task duration. Real
+ZedProfiler feature tasks ran `1-3s` each in the synthetic probe; at
+`200 / 60 min` a `200`-task run would take at least `~60` minutes from submit
+pacing alone, regardless of how fast the tasks themselves complete. Treat
+`submitRateLimit` as a throughput cap that multiplies against total task count,
+not a pressure-relief valve that only bites past `queueSize`. Prefer batching to
+cut task count before adding a submit-rate limit for many-short-task
+workloads.
+
 ## Synthetic Experiment Findings
+
+*Scope: when using Nextflow.*
 
 Small synthetic runs completed successfully through `Persistence1`.
 
@@ -273,6 +394,144 @@ work list and feature scripts before rewriting processing code.
 
 ## ZedProfiler Runtime
 
+### When Not Using Nextflow: Building And Validating The Runtime
+
+*Scope: general — building and sanity-checking a ZedProfiler-capable runtime
+does not require Nextflow at all. Everything in this subsection was run via a
+plain `sbatch` job or direct `apptainer exec`/`apptainer build`, never through
+`make run`/`make submit`.*
+
+The tested base Python environment on `Persistence1` is not suitable for real
+ZedProfiler:
+
+- Python 3.9.13
+- NumPy 1.21.5
+- Pandas 1.4.4
+- scikit-image 0.19.2
+- missing `mahotas`
+- missing `pyarrow`
+- missing `zedprofiler`
+
+Real ZedProfiler work needs a project-owned Python 3.11+ environment. The
+validated `uv` path satisfies that requirement today. Consider an
+Apptainer/Singularity image only if `uv` becomes hard to reproduce across users,
+the dependency set stops resolving cleanly, or CURC/project policy requires a
+container artifact.
+
+CURC's contact explicitly recommended Apptainer/Singularity over `uv`/conda for
+this shared project, citing reproducibility and long-term maintainability over
+raw convenience, and confirmed the site Apptainer (`1.4.5`) and Singularity
+(`3.7.4`) should handle Python 3.11. A minimal smoke test on `2026-08-06`
+confirms the mechanics work:
+
+```bash
+apptainer pull python311.sif docker://python:3.11-slim
+apptainer exec python311.sif python3 --version
+```
+
+Run as a short (`10` min walltime, `1` CPU, `2` GB mem) batch job on the `acpu`
+partition (not on `Persistence1`, consistent with keeping compute off the
+orchestrator host):
+
+- `apptainer version 1.4.5-3.el8` matched CURC's stated version
+- the pull of `python:3.11-slim` from Docker Hub completed in about `25s`
+- `python3 --version` reported `Python 3.11.15` inside the container
+- basic standard-library imports (`sqlite3`, `zlib`) worked
+
+This is still only a mechanics check: it does not install or import
+`zedprofiler`, `mahotas`, `pyarrow`, or `scikit-image` inside a container, and it
+does not build a project-owned `.sif` image or test on real NF1 image data. It
+upgrades Apptainer from "available fallback, not preferred" to "confirmed
+working for Python 3.11 on Alpine compute nodes," which is enough evidence to
+justify a real side-by-side comparison (build a ZedProfiler-dependency
+Apptainer image vs. the validated `uv` environment) before committing to one
+runtime for production, especially given CURC's explicit reproducibility
+preference for containers on a shared project.
+
+**Real ZedProfiler dependencies confirmed in Apptainer (2026-08-06).** Followed
+through on the side-by-side comparison above. Built a project-owned image with
+the same dependency set as the validated `uv` environment:
+
+```text
+Bootstrap: docker
+From: python:3.12-slim
+
+%post
+    apt-get update
+    apt-get install -y --no-install-recommends procps
+    rm -rf /var/lib/apt/lists/*
+    pip install --no-cache-dir zedprofiler mahotas pyarrow numpy pandas scikit-image
+```
+
+Built via `apptainer build --fakeroot` as a short batch job on `acpu` (fakeroot
+works via a root-mapped namespace fallback even though this user has no
+`/etc/subuid`/`/etc/subgid` entries). Build + install took about `2m12s`-`3m20s`
+across two builds. Image lands at
+`/projects/$USER/software/apptainer/zedprofiler.sif` (about `294 MB`).
+Import validation (direct `apptainer exec`, not Nextflow) matched the `uv`
+probe exactly on `zedprofiler` version:
+
+- `zedprofiler 0.1.1` (same release as `uv`), `numpy 2.5.1`, `pandas 3.0.5`,
+  `mahotas 1.4.18`, `pyarrow 25.0.0`, `scikit-image 0.26.0` — all newer than the
+  `uv` probe's pinned versions, since this was an unconstrained `pip install`
+  inside a fresh image rather than a lockfile-driven resolve
+- all imports succeeded on the first real ZedProfiler-dependency build
+
+The `procps` package (providing `ps`) was included in the `%post` step above
+from the start of this build. That's not incidental — see the next subsection
+for why it's required the moment Nextflow orchestrates the container, even
+though it made no difference to this direct `apptainer exec` validation.
+
+**Real feature calls on real data (2026-08-06).** Everything above only proves
+`zedprofiler` imports. To close that gap, ran actual feature extractors against
+a small real CellProfiler-3D-tutorial nuclei dataset bundled with
+ZedProfiler's own test suite (`100×258×258` `uint16` volumes + segmentation
+masks, 5 objects) under `tests/data/CP_tutorial_3D_noise_nuclei_segmentation/`.
+Pulled one image/mask pair (`nuclei1_out_c00_dr90_image.tif`), built an
+`ImageSetLoader`/`ObjectLoader` exactly as ZedProfiler's own
+`tests/featurization/test_real_world_data.py` does, and called three real
+extractors (via the `uv` environment, no Nextflow, `2` CPUs / `4` GB / `15`
+min batch job on `acpu`):
+
+- `compute_intensity`: `5` rows, `2.835s`
+- `compute_volume_size_shape`: `5` rows, `0.599s`
+- `compute_granularity` (`radius=1`, `granular_spectrum_length=2`,
+  `subsample_size=1.0`, `image_sample_size=1.0`): `5` rows, `12.878s`
+- all three finite, `5/5` expected objects, exit `0`
+- job peak RSS: `1061332K` (`~1.01 GB`) for just these 3 of 6 feature calls on
+  a single image
+
+This is the first real, non-synthetic, non-import-only evidence that
+`zedprofiler` actually runs correctly end-to-end on Alpine. Two things fall out
+of it that change prior assumptions:
+
+- **Granularity was far more expensive here than ZedProfiler's own upstream
+  benchmarking has reported for comparable real-world data.** `12.9s` for one
+  real image here vs. a roughly `~7×` lower number reported upstream at one
+  point for the same feature on similar tutorial data. Treat any upstream
+  ZedProfiler timing numbers as a moving target — they depend on which
+  release/branch is installed and which `granularity` parameters were used
+  (this probe used no downsampling: `subsample_size=1.0`/`image_sample_size=1.0`,
+  likely the most expensive setting), not just hardware. Don't use a
+  remembered upstream benchmark number for Alpine time-budget planning without
+  re-measuring against the exact `zedprofiler` version actually installed —
+  this probe's numbers are the ones actually measured on this cluster, with
+  this version, with these parameters.
+- **The ~1GB peak RSS for a partial real-image run lands right at Nextflow's
+  silent 1 CPU / 1 GB per-task default** (see Slurm Defaults and Important
+  Failure Modes). A real production task calling all 6 feature extractors, or a
+  larger volume, would plausibly exceed `1 GB` and get OOM-killed with the
+  current `nextflow.config`, which sets no `process.memory`/`process.cpus` for
+  `CHARACTERIZE_ITEM`. This is no longer a hypothetical risk — treat setting an
+  explicit, generous `process.memory` (well above `1 GB`) as a prerequisite for
+  any real ZedProfiler production run, not an optimization to defer.
+
+### When Using Nextflow: Orchestrating ZedProfiler Work
+
+*Scope: when using Nextflow. This subsection covers running the validated
+runtimes above (`uv` or the Apptainer image) as actual Nextflow processes
+through `make run`/`make submit`.*
+
 The `zp_synthetic_features` experiment completed successfully on Alpine through
 `Persistence1`:
 
@@ -292,24 +551,56 @@ Observed result:
 This confirms the orchestration shape for tiny CPU-first 3D feature work, but it
 does not validate real ZedProfiler imports or image I/O.
 
-The tested base Python environment on `Persistence1` is not suitable for real
-ZedProfiler:
+**Gotcha, first Apptainer-through-Nextflow attempt failed:** running
+`zp_apptainer_probe` (the `zp_synthetic_features` workload with
+`process.container` pointed at the `.sif` built above,
+`FORMASCUTE_ENABLE_CONTAINER=true`) through Nextflow+Slurm failed every task
+with:
 
-- Python 3.9.13
-- NumPy 1.21.5
-- Pandas 1.4.4
-- scikit-image 0.19.2
-- missing `mahotas`
-- missing `pyarrow`
-- missing `zedprofiler`
+```text
+Command 'ps' required by nextflow to collect task metrics cannot be found
+```
 
-Real ZedProfiler work needs a project-owned Python 3.11+ environment. The
-validated `uv` path satisfies that requirement today. Consider an
-Apptainer/Singularity image only if `uv` becomes hard to reproduce across users,
-the dependency set stops resolving cleanly, or CURC/project policy requires a
-container artifact.
+A bare `python:3.12-slim` base has no `procps` package, so no `ps` binary.
+Nextflow's Slurm+container executor shells into the container to poll task
+metrics for `trace.tsv`/RSS/CPU accounting, and needs `ps` present *inside* the
+image, not just on the host. This never surfaced in the direct `apptainer exec`
+import validation above — it only appears once Nextflow actually orchestrates
+through the container. The `uv` path never hits this because it runs directly
+on the host with no container boundary. Any Apptainer/Singularity image
+intended for Nextflow-orchestrated execution on Alpine must include `procps`
+(or equivalent), not just the workload's own Python dependencies.
+
+After adding `procps` to the `%post` step and rebuilding, the same probe
+completed cleanly:
+
+```bash
+FORMASCUTE_ENABLE_CONTAINER=true make run EXPERIMENT=zp_apptainer_probe ITEMS=4 ACCOUNT=amc-general PROFILE=alpine RUN_ID=zp-sim-apptainer-02
+```
+
+- `nextflow_exit_status: 0`, `validation.json` `"valid": true`, `4/4` items
+- 4 feature tasks + 1 validation task, all `COMPLETED`
+- per-task `realtime` about `1.3s`, `peak_rss` about `21 MB` — in the same range
+  as the `uv` path's `zp_synthetic_features` probe (`9-32 MB` peak RSS)
+- coordinator `Duration: 1m 16s` for 4 items + validation
+
+Bottom line: Apptainer is now confirmed end-to-end for this workload shape —
+same `zedprofiler` version, same synthetic feature output, comparable resource
+footprint to `uv` — but only after fixing a container-specific plumbing gap
+that has no equivalent on the `uv` path. Treat "does the image have `procps`"
+as a standard checklist item for any future Apptainer image built for this
+project's Nextflow pipeline. This still does not test real NF1 image I/O or
+heavier ZedProfiler calls (`neighbors`, `granularity`, and other feature
+extractors that are known to cost meaningfully more than a bare import) inside
+the container — only that the dependency set installs, imports, and survives
+Nextflow's container orchestration.
 
 ## uv Prototype Path
+
+### When Not Using Nextflow: Building And Validating The uv Environment
+
+*Scope: general — building and import-checking the `uv` environment is plain
+shell/Python work, no Nextflow involved.*
 
 CURC documents a `uv` module for Python environments. The documented flow is:
 
@@ -352,6 +643,12 @@ print(zedprofiler.__file__)
 PY
 ```
 
+### When Using Nextflow: Running Through Nextflow
+
+*Scope: when using Nextflow. This subsection covers activating the `uv`
+environment validated above and then running it as an actual Nextflow process
+through `make run`.*
+
 Validated simple experiment using the `uv` environment:
 
 ```bash
@@ -390,6 +687,9 @@ combined Nextflow-module plus `uv` Python environment.
 
 ## Runtime Direction
 
+*Scope: general decision guidance — applies regardless of whether Nextflow
+ends up orchestrating the runtime.*
+
 For current Alpine work, prioritize the validated `uv` runtime:
 
 - keep the environment under `/projects/$USER/software/uv/envs`
@@ -399,32 +699,99 @@ For current Alpine work, prioritize the validated `uv` runtime:
   in run manifests
 - add import smoke checks for ZedProfiler and scientific imaging dependencies
 
-Apptainer/Singularity remains a possible later packaging option, but do not push
-the project toward it by default. The present evidence favors `uv` because it has
-already worked on Alpine for Python 3.12 and ZedProfiler dependency resolution.
+Apptainer/Singularity remains a real, now-validated alternative, not just a
+later packaging option. As of `2026-08-06`, both paths are confirmed
+end-to-end for the same synthetic workload: same `zedprofiler 0.1.1` release,
+comparable peak RSS (`9-32 MB` for `uv`, `~21 MB` for Apptainer), both pass
+validation through Nextflow+Slurm. CURC's contact explicitly prefers
+Apptainer/Singularity for this shared project's reproducibility, and now that
+preference has real evidence behind it, not just a smoke test. Real feature
+calls (not just imports) are now validated on the `uv` side against real data
+(see ZedProfiler Runtime); the Apptainer side has not had the same real-data
+feature-call check yet, only synthetic orchestration and import validation.
+Neither has been tested against real NF1 image I/O, and `granularity` is a
+known expensive, currently-unoptimized feature extractor worth watching in any
+timing comparison. Decide between them based on operational preference (CURC's
+reproducibility argument for images vs. `uv`'s faster iteration for a
+still-changing dependency set) rather than technical blockers, since there no
+longer are any known blockers on the Apptainer side beyond the `procps`
+requirement noted in ZedProfiler Runtime.
 
 ## Important Failure Modes
+
+### When Using Nextflow
 
 - Submitting directly from the regular Alpine login node failed because the batch
   job could not load `nextflow/25.10.2`. Use `Persistence1` unless the module
   environment changes.
-- Do not rely on the base `Persistence1` Python environment for real ZedProfiler.
 - Do not let the orchestrator perform image processing directly on
   `Persistence1`.
 - Do not assume a large Nextflow `queueSize` increases active Slurm concurrency
   beyond the site/user limit.
 - Do not raise submit rate or queue size without checking orchestrator RSS and
   Slurm accounting first.
+- Do not build an Apptainer/Singularity image for Nextflow-orchestrated
+  execution without `procps` installed. Nextflow's Slurm+container executor
+  needs `ps` *inside* the container for task metrics collection; a bare
+  `python:3.x-slim` base lacks it and every task fails with `Command 'ps'
+  required by nextflow to collect task metrics cannot be found`. A plain
+  `apptainer exec` smoke test will not catch this — it only surfaces once
+  Nextflow orchestrates through the container.
+- Do not run real ZedProfiler work without setting an explicit
+  `process.memory`. Nextflow's default (`1 GB`) is smaller than the `acpu`
+  partition's own default and was measured landing right at that ceiling for a
+  partial real-image feature extraction (`~1.01 GB` peak RSS for `3` of `6`
+  extractors on one image). See Slurm Defaults.
+
+### General (Alpine / Apptainer, Not Nextflow-Specific)
+
+- Do not rely on the base `Persistence1` Python environment for real ZedProfiler.
+- When building with `apptainer build --fakeroot` in a Slurm batch job, stage
+  the `.def` file on a shared filesystem (scratch/project), not `/tmp` on the
+  login node — compute nodes have their own local `/tmp`, not shared with the
+  login node.
 
 ## Questions To Revisit With CURC
 
-Revisit these after real imaging traces exist:
+Answered by CURC's contact on `2026-08-06` and now also backed by direct
+experiment/cgroup evidence in this file:
 
-- Does the 200 active-job limit apply exactly to this allocation and user group?
-- Is `submitRateLimit = '200 / 60 min'` appropriate for the observed task
-  duration, or should the window be shorter or longer?
+- The 200 active-job limit: CURC confirmed `queueSize=1000` would still be
+  capped near 200 concurrent by Slurm, with the rest pending; `submitRateLimit`
+  was offered as an alternative pressure valve, tunable by expected walltime.
+- Container vs. `uv` vs. conda: CURC recommends Apptainer/Singularity for
+  reproducibility on this shared project, confirmed the site version handles
+  Python 3.11, called conda harder to maintain long-term, and had no strong
+  view on `uv` specifically.
+- `Persistence1` RAM: CURC recommends monitoring orchestrator RAM via
+  `top`/`htop -u $USER`; the VM is `8` cores / `8` GB with per-user cgroups at
+  `20%` RAM / `80%` CPU, and the orchestrator risks cancellation if it exceeds
+  the RAM limit for too long. Now quantified exactly: see Orchestrator
+  Monitoring.
+- Use `tmux`/`screen` on `Persistence1` for long-lived runs: already documented
+  above under Connection.
+
+Still open, revisit after real imaging traces exist:
+
+- Is `submitRateLimit = '200 / 60 min'` still the right shape given the
+  `2026-08-06` finding that it paces every submission at a steady rate from job
+  1, not just once near the 200-job ceiling, imposing a wall-clock floor of
+  roughly `task_count × 18s` at that setting? For many short ZedProfiler tasks
+  this floor could dominate total runtime; ask whether CURC would rather see
+  moderate batching to cut task count, a shorter rate window, or no rate limit
+  below some task-count threshold.
 - Does CURC prefer Nextflow-managed tasks over Slurm arrays for this workflow
   once retries, accounting, and output validation are considered?
 - Should SAMMed3D GPU work use a separate profile, partition, QoS, and runtime?
 - What orchestrator RSS range is acceptable for multi-day runs on
-  `Persistence1`?
+  `Persistence1`, relative to the confirmed `~1.6 GB` cgroup cap?
+- Does CURC have an opinion between the validated `uv` ZedProfiler environment
+  and a project-owned Apptainer image once both are compared on the same real
+  workload?
+- Why did real `granularity` extraction on Alpine (`12.9s` for one image) run
+  well above what upstream ZedProfiler benchmarking has reported for
+  comparable real-world data at other points in time? Worth raising with the
+  ZedProfiler maintainers directly (version/branch and parameter differences,
+  not necessarily an Alpine-specific question) before trusting any remembered
+  upstream number for time-budget planning — always re-measure against the
+  exact installed version instead.
