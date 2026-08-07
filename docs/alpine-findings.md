@@ -398,6 +398,37 @@ Ordinary multi-tenant queue contention (`squeue -p acpu | wc -l`, `sinfo -p
 acpu` immediately before a real run) is still the most directly checkable
 residual risk, but no longer the only one.
 
+### CURC answered directly (2026-08-07): mostly good news, one new seasonal risk
+
+CURC's contact (Gregory Way) responded to the questions above. Full detail in
+`.agents/skills/alpine.md` under "CURC's Direct Answer"; summary:
+
+- **Institution fairshare confirmed and quantified**: AMC holds `6,459` of
+  Alpine's priority shares (`~1,085,112` SU/week sustainable budget
+  institution-wide); current `levelfs_inst=1.002854`, matching this project's
+  own independent reading (`1.0104`) closely. Validates the self-check
+  methodology.
+- **`queueSize=200` for the `4200`-task run: explicitly "no harm."** Batch
+  only if walltimes grow long. This is a direct, meaningful confidence
+  increase for the production estimate's core approach.
+- **`cpu-long` question closed**: it's for walltime `>24h`, not a priority
+  shortcut for short jobs. `cpu-normal` remains correct for this workload.
+- **New risk, unrelated to this project's config**: Alpine's `cpu-normal`/
+  `cpu-long` QOS structure is new (rolled out over the summer, replacing an
+  older setup specifically to reduce long wait times), and CURC "cannot
+  guarantee" it holds up during named peak season, **September through
+  November**. Every queue-wait measurement in this document was taken during a
+  quieter period. Treat a production run scheduled in that window as having
+  materially higher queue-wait uncertainty than anything measured here, for
+  reasons independent of this project.
+- **GPU work confirmed** to need a separate partition/QOS; reference doc and
+  profiling tool guidance provided (`nvidia-smi`, `nvitop`, `sacct -Pno
+  TRESUsageInMax/InAve`, `nsys`/`ncu`).
+- **Orchestrator guidance mostly matches existing practice** (bash script in
+  `screen`/`tmux`, one walltime via Nextflow `params`), but CURC's suggested
+  `ulimit -m 2G` self-limit is higher than this project's own measured hard
+  cgroup cap (`~1.6 GB`) — unreconciled, use the lower measured number.
+
 ## Production Time Estimate: 4200 Image Sets (2026-08-07)
 
 Synthesizes every finding above into one working estimate for the real
@@ -445,15 +476,17 @@ and `colocalization` (`7.376s`) are `~86%` of that.
    runs real production ZedProfiler calls. Skipping this risks OOM + retry
    storms (`maxRetries=3`, each retry repeats the full `~23s` task), not just
    slowness.
-4. **Priority/deprioritization is more nuanced than the earlier check
-   suggested** (see "Correction" under Fairshare/priority checked above).
-   This project's own fairshare is healthy, but institution-wide AMC usage on
-   Alpine, job-size/QOS priority weights (both outrank fairshare here), and
-   `amc-general`'s allocation tier are real factors that haven't been
-   verified and aren't controlled by this project. Combined with ordinary
-   live queue depth from other users (check `squeue -p acpu | wc -l` /
-   `sinfo -p acpu` immediately before a real run), this is the least
-   quantified risk in this whole estimate.
+4. **Priority/deprioritization: mostly de-risked by CURC's direct answer, one
+   new seasonal caveat remains.** CURC confirmed `queueSize=200` for this
+   exact workload shape is fine, closed the `cpu-long` question, and quantified
+   institution-level fairshare as healthy (see "CURC answered directly"
+   above). The one real remaining unknown is seasonal: Alpine's QOS structure
+   is new this summer and CURC "cannot guarantee" it holds up during named
+   peak season (September-November) — a run scheduled in that window carries
+   materially more queue-wait uncertainty than this estimate reflects, for
+   reasons independent of this project's own config or usage. Check live
+   queue depth (`squeue -p acpu | wc -l` / `sinfo -p acpu`) immediately before
+   any real run regardless of season.
 
 **What this does not account for:**
 
