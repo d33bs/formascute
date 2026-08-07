@@ -291,6 +291,42 @@ Two findings fall out of this:
 2. **The memory gap below is now confirmed, not hypothetical**: `~1.01 GB` for
    a partial single-image run lands right at Nextflow's silent per-task default.
 
+### Full 6-feature real-data run through Nextflow, with explicit memory (2026-08-07)
+
+Closed both remaining gaps in one run. A small standalone workflow
+(`workflows/real_feature_probe.nf`, not part of the `bin/formascute`
+experiment framework) called all `6` real ZedProfiler feature extractors
+(adding `neighbors`, `texture`, `colocalization` to the three above) with
+explicit `memory '4 GB'` / `cpus 2` process directives, through real
+Nextflow-and-Slurm orchestration:
+
+- `intensity` `1.37s`, `volume_size_shape` `0.382s`, `neighbors` `0.107s`,
+  `texture` `1.269s`, `granularity` `12.47s`, `colocalization` `7.376s`
+- **total: `~23.0s` per real image set, all 6 features, `5/5` objects
+  finite, exit `0`**
+- `sacct` confirmed `AllocTRES=cpu=2,mem=4G,node=1` (directives honored) and
+  `MaxRSS=1052144K` (`~1.0 GB`) — same peak as the partial run, no OOM,
+  confirming memory use is dominated by one internal peak, not additive per
+  feature call
+- `granularity` + `colocalization` together are about `86%` of total per-image
+  time
+
+This is now a real, measured per-task cost (not a range) to plan production
+timing from, and confirms an explicit `process.memory` directive is both
+necessary (see above) and sufficient (this run) to run real ZedProfiler work
+safely under Nextflow.
+
+**Unrelated blocker found and fixed along the way**: the first attempt at this
+run failed every submission with `sbatch: error: Error 17: Time has not been
+specified ... Specifying job run time is now required`. Neither
+`conf/alpine.reference.config`'s base `process {}` block nor
+`workflows/synthetic.nf` has ever set `process.time`, so this would break
+every existing experiment config, not just this probe, the next time any of
+them runs. Likely a platform policy rollout tied to CURC's `2026-08-05`
+maintenance window (worked as recently as `2026-08-06`). Fixed by adding
+`time = 30.m` to the base `process {}` block in
+`conf/alpine.reference.config`.
+
 ### Nextflow's default per-task allocation is smaller than the partition default
 
 Neither `nextflow.config` nor `conf/alpine.reference.config` sets
@@ -308,6 +344,135 @@ has silently run under Nextflow's own default. Confirmed via `sacct
 
 Set an explicit, generous `process.memory` before any real ZedProfiler/NF1
 production run.
+
+### Fairshare/priority checked ahead of a 4200-image production estimate (2026-08-07)
+
+Read-only Slurm checks (`sshare`, `sacctmgr show qos`, `sacctmgr show assoc`,
+`scontrol show partition`), prompted by planning a ~4200-image-set production
+run:
+
+- the `200`-job limit is a hard `MaxJobs=200` Slurm *association* cap for this
+  account+user, confirmed via `sacctmgr show assoc` — not a soft guideline,
+  and not visible in the QOS record itself (`cpu-normal` only sets
+  `MaxSubmitPU=1000`)
+- that `200` is shared across every QOS on the association (`cpu-normal`,
+  `gpu-normal`, etc.) — concurrent CPU and GPU work would split one pool
+- user-level fairshare standing is very healthy: `FairShare=0.198764`,
+  `LevelFS=1721` (far above `1`, deeply underused relative to target share). A
+  `~29`-core-hour run is negligible against the account's `4,452,778,012`-unit
+  cumulative usage and would not trigger priority decay
+- `acpu` is `420` nodes / `26,976` CPUs at baseline `PriorityTier=1`; a
+  `200`-core ask is under `1%` of partition capacity
+
+### Correction: the fairshare picture above was incomplete (2026-08-07, same day)
+
+CURC's own allocations and FAQ docs (linked by the user) surfaced three things
+the checks above missed:
+
+1. **`levelfs $USER` reports a separate institution-level number.**
+   `LevelFS_User=1687.66` (matches the `sshare` reading), but
+   `LevelFS_Inst=1.0104` for institution `amc` — at parity, not headroom. Our
+   own usage being tiny doesn't protect against Anschutz-wide usage on Alpine
+   depressing priority for every AMC account, a risk with no visibility and no
+   project-side control.
+2. **Fairshare is not the dominant priority factor.** `scontrol show config`:
+   `PriorityWeightJobSize=40320` > `PriorityWeightQOS=30240` >
+   `PriorityWeightAge=20160` = `PriorityWeightFairShare=20160`. `cpu-normal`
+   (used) has QOS `Priority=0`; `cpu-long` (also available on this
+   association) has `Priority=200` — a real, currently-unused priority
+   contribution worth asking CURC about, not a "switch now" call without
+   understanding `cpu-long`'s tradeoffs.
+3. **`amc-general`'s allocation tier is administratively invisible from
+   here.** CURC's docs state AMC allocations are managed separately by that
+   institution, and that jobs on properly-approved tiers (Ascent/Peak) get
+   higher priority than auto-granted (Trailhead) ones. `sacctmgr show account
+   amc-general` returns nothing useful — confirming this can't be
+   self-verified via Slurm queries; it needs a direct question to
+   `hpcsupport@cuanschutz.edu` or the project's CURC contact.
+
+Revised interpretation: this project's own usage is not a deprioritization
+risk — but "fairshare rules it out" overstated what one check can show.
+Institution-wide AMC usage, job-size/QOS priority weights, and allocation tier
+are all real factors this project hasn't verified and doesn't control.
+Ordinary multi-tenant queue contention (`squeue -p acpu | wc -l`, `sinfo -p
+acpu` immediately before a real run) is still the most directly checkable
+residual risk, but no longer the only one.
+
+## Production Time Estimate: 4200 Image Sets (2026-08-07)
+
+Synthesizes every finding above into one working estimate for the real
+NF1/ZedProfiler production scale (`4200` image sets). Treat this as a planning
+number, not a guarantee — see "What this does not account for" below.
+
+**Assumption stated up front:** one Nextflow task computes all needed feature
+families per image set (`4200` tasks total). If production fan-out is instead
+per channel/feature-family/compartment (`nf1_featurization_independent`-style
+splitting, hinted at in Recommended NF1 Orchestration Direction below), total
+task count could be `5-10×` higher and this estimate would need rescaling
+before use.
+
+**Per-task cost — measured, not guessed:** `~23.0s` for a real image set, all
+`6` feature extractors, confirmed via a real Nextflow+Slurm run with explicit
+`memory '4 GB'` / `cpus 2` (see ZedProfiler Runtime). `granularity` (`12.47s`)
+and `colocalization` (`7.376s`) are `~86%` of that.
+
+**Math:**
+
+- total compute: `4200 × 23.0s ≈ 96,600s` (`~26.8` task-hours)
+- concurrency ceiling: `MaxJobs=200` (confirmed hard Slurm association cap,
+  not a soft guideline — see Fairshare, Priority, And The 200-Job Limit), each
+  task using `2` CPUs → up to `400` of the partition's `26,976` cores, under
+  `2%` of capacity
+- `4200 / 200 = 21` exactly — `21` pipelined waves of `~23.0s` compute each
+- best case (perfect pipelining, no dispatch/queue overhead):
+  `21 × 23.0s ≈ 483s ≈ 8` minutes
+- realistic range once per-wave Slurm dispatch/scheduling overhead is added:
+  **roughly `15-40` minutes**
+
+**What would make this estimate wrong, ranked by how much it would move:**
+
+1. **Task-count assumption above** — if fan-out is per-feature-family/channel
+   instead of per-image-set, this is off by `5-10×`.
+2. **`submitRateLimit` at CURC's suggested `200 / 60 min`.** Confirmed this
+   paces every submission `~18s` apart from job 1, regardless of task count or
+   `queueSize` headroom (see Queue And Batching Policy). At `4200` tasks that
+   alone adds `4200 × 18s ≈ 21 hours` — do not enable it for this run.
+3. **`process.memory` not actually set on the real production process.**
+   `conf/alpine.reference.config` now defaults `process.time = 30.m` for every
+   process, but does *not* default `process.memory` — that was only proven
+   safe at `4 GB` on the one-off validation workflow
+   (`workflows/real_feature_probe.nf`), not yet wired into whatever process
+   runs real production ZedProfiler calls. Skipping this risks OOM + retry
+   storms (`maxRetries=3`, each retry repeats the full `~23s` task), not just
+   slowness.
+4. **Priority/deprioritization is more nuanced than the earlier check
+   suggested** (see "Correction" under Fairshare/priority checked above).
+   This project's own fairshare is healthy, but institution-wide AMC usage on
+   Alpine, job-size/QOS priority weights (both outrank fairshare here), and
+   `amc-general`'s allocation tier are real factors that haven't been
+   verified and aren't controlled by this project. Combined with ordinary
+   live queue depth from other users (check `squeue -p acpu | wc -l` /
+   `sinfo -p acpu` immediately before a real run), this is the least
+   quantified risk in this whole estimate.
+
+**What this does not account for:**
+
+- `n=1`: the `~23.0s` figure is one real image set with `5` objects. Production
+  images will vary in size and object count; `granularity`/`texture` cost
+  plausibly scales with both. This is a calibration point, not a
+  statistically characterized distribution.
+- Real production-path image I/O. The probe read pre-staged local-scratch
+  copies of small (`~13 MB`) tutorial images, not the actual production data
+  location, volume, or concurrent-read pattern at `4200`-image scale.
+- Sustained-scale orchestrator behavior. Nextflow task tracking has only been
+  exercised up to `~17` concurrent synthetic items and `1` real-data item —
+  never at anything close to `200` concurrent real tasks.
+
+A moderate rehearsal (tens to ~100 real image sets, through Nextflow, with
+`process.memory` explicitly set) — proposed and deferred earlier as "not yet
+ready for" — is what would close the remaining gaps (`n=1` variance, real I/O,
+sustained-scale orchestrator/queue behavior) before committing to the full
+`4200`.
 
 ## Interpretation
 

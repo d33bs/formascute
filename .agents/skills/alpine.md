@@ -31,6 +31,14 @@ runtime environment behavior.
   first job, regardless of total item count or `queueSize` headroom. It is not
   dormant just because the run is far below the job-count ceiling. Confirmed by
   experiment: see Queue And Batching Policy.
+- Real per-image-set ZedProfiler cost is measured at `~23.0s` (all `6`
+  features, real data), not guessed. A `4200`-image production run works out
+  to roughly `15-40` minutes under current settings, contingent on
+  `process.memory` actually being set on whatever process runs the real work
+  (proven safe at `4 GB`, but not yet a repo-wide default) and on the
+  task-count assumption (one task per image set) holding. Full math and
+  caveats: `docs/alpine-findings.md`, "Production Time Estimate: 4200 Image
+  Sets."
 
 ## Connection
 
@@ -201,6 +209,39 @@ has silently gotten Nextflow's own conservative default. Checked via
 Set an explicit `process.memory` (and likely `process.cpus`) before any real
 ZedProfiler/NF1 production run; do not rely on Nextflow's default.
 
+**Confirmed fixed and working on `2026-08-07`.** Ran a standalone Nextflow
+process (`workflows/real_feature_probe.nf`) with explicit `memory '4 GB'` /
+`cpus 2` directives, calling all `6` real ZedProfiler feature extractors on
+real data through actual Slurm submission (not a bare `sbatch` script). `sacct`
+confirmed the directives were honored exactly: `ReqMem=4G`,
+`AllocTRES=cpu=2,mem=4G,node=1`. Peak RSS for all `6` extractors together was
+`~1.0 GB` (`1052144K`) — essentially the same as the earlier partial `3`-feature
+measurement, meaning memory use is dominated by a peak within one process (very
+likely image/array loading and intermediate buffers), not additive per feature
+call. Exit `0`, no OOM. This closes the "does an explicit `process.memory`
+directive actually work under Nextflow+Slurm orchestration" question — it does,
+cleanly, at `4 GB` for this workload shape.
+
+**A new, unrelated blocker surfaced and was fixed along the way.** The first
+attempt at this same run failed every submission with
+`sbatch: error: Error 17: Time has not been specified (i.e. the Slurm directive
+--time). Specifying job run time is now required.` Neither the base `process {}`
+block in `conf/alpine.reference.config` nor `workflows/synthetic.nf`'s
+`CHARACTERIZE_ITEM` process has ever set a `time` directive — only
+`withLabel:process_long` did (`24.h`). This means Alpine now requires an
+explicit walltime on every individual Slurm submission, not just the
+coordinator job (which already had `--time=01:00:00` from `bin/formascute`).
+This is a recently-changed platform policy, not something specific to this
+probe — it would break every existing experiment config in this repo
+(`nf1_*`, `zp_synthetic_features`, `zp_apptainer_probe`, all of them) the next
+time any of them runs, since none of them set `process.time` either. Given the
+timing (this worked as recently as `2026-08-06`, and CURC's own maintenance
+window fell on `2026-08-05`, see Downtime Awareness), this reads like a policy
+rollout tied to that maintenance, not a one-off. Fixed by adding
+`time = 30.m` to the base `process {}` block in
+`conf/alpine.reference.config`, which now protects every experiment that
+doesn't set its own `time`.
+
 ## Production Submission Shape
 
 *Scope: when using Nextflow.*
@@ -360,6 +401,86 @@ pacing alone, regardless of how fast the tasks themselves complete. Treat
 not a pressure-relief valve that only bites past `queueSize`. Prefer batching to
 cut task count before adding a submit-rate limit for many-short-task
 workloads.
+
+## Fairshare, Priority, And The 200-Job Limit
+
+*Scope: general Slurm facts — these are association/QOS/partition properties,
+not Nextflow settings, and apply regardless of orchestration mechanism.*
+
+Confirmed directly on `2026-08-07` via `sshare`, `sprio`, `levelfs`,
+`sacctmgr show qos`, `sacctmgr show assoc`, `scontrol show config`, and
+`scontrol show partition` (all read-only, no job submitted):
+
+- **The `200` figure has a precise source.** It is a hard `MaxJobs=200` at the
+  Slurm *association* level for this account+user combination
+  (`sacctmgr show assoc`), not a soft campus guideline and not set in the QOS
+  record itself (`cpu-normal`'s own `MaxJobsPU` is blank; its only relevant cap
+  is `MaxSubmitPU=1000`, a looser, separate ceiling on total submitted jobs).
+  `queueSize=200` is correctly matched to a real enforced ceiling.
+- **That `MaxJobs=200` is shared across every QOS this association has**,
+  including `cpu-normal`, `gpu-normal`, `gpu-long`, etc. — one pool, not 200
+  per QOS. Concurrent CPU (ZedProfiler) and GPU (SAMMed3D) work under the same
+  account/user would split one 200-job budget, not get 200 each.
+- **Fairshare has two distinct layers here — user and institution — and only
+  one of them is healthy.** CURC's own `levelfs $USER` command reports both:
+  `LevelFS_User=1687.66` for this user within `amc-general` (deeply underused,
+  matches the earlier `sshare` reading of `~1721`), but
+  **`LevelFS_Inst=1.0104` for institution `amc`** — sitting almost exactly at
+  `1.0`, i.e. parity, not headroom. `LevelFS` above `1` means underused,
+  below `1` means overused/deprioritized; `1.0104` is barely on the good side
+  of neutral. This means our own account's fairshare being extremely healthy
+  does not, by itself, protect against Anschutz-wide usage: if *other* AMC
+  labs/users on Alpine increase their usage, the institution-level factor can
+  drop below `1` and depress priority for every AMC account, including this
+  one — a shared-fate risk with zero visibility into other AMC users' current
+  or planned usage, and nothing this project can do to control it.
+- **Fairshare is not even the dominant priority factor on this cluster.**
+  `scontrol show config` shows the actual multifactor weights:
+  `PriorityWeightJobSize=40320` (highest), `PriorityWeightQOS=30240`,
+  `PriorityWeightAge=20160`, `PriorityWeightFairShare=20160` (tied for
+  smallest of the four nonzero weights), `PriorityWeightPartition=0`,
+  `PriorityWeightAssoc=0`. A "fairshare looks healthy" conclusion alone is
+  incomplete — job size and QOS choice matter as much or more.
+- **`cpu-normal` (what this project uses) has QOS `Priority=0`; `cpu-long`
+  — also available on this same association — has `Priority=200`.**
+  (`sacctmgr show qos format=Name,Priority`.) With `PriorityWeightQOS=30240`,
+  that is a real, currently-unused priority contribution
+  (`200 × 30240 = 6,048,000` raw priority points). Not a "switch immediately"
+  recommendation — `cpu-long` almost certainly comes with different
+  constraints (walltime expectations, possibly different limits) that haven't
+  been checked — but it is a concrete, previously-unexamined lever worth
+  asking CURC about or testing directly, not something to leave on the table
+  without at least understanding the tradeoff.
+- **`amc-general`'s allocation tier and health are administratively opaque
+  from Alpine's side.** CURC's own documentation states AMC allocations are
+  "managed by that institution," separately from CU Boulder's self-service
+  Trailhead/Ascent/Peak system, and that jobs on the properly-approved
+  Ascent/Peak tiers get higher priority than auto-granted Trailhead
+  allocations. `sacctmgr show account amc-general` returns no useful
+  tier/description/organization info from here — confirming this really is
+  invisible to standard Slurm queries on this side. Whether `amc-general` is
+  in a Trailhead-equivalent (lower-priority) or a properly-approved
+  (higher-priority) tier is unknown and unverifiable without asking Anschutz's
+  own HPC support (`hpcsupport@cuanschutz.edu`) or the project's CURC contact
+  directly.
+- **The `acpu` partition is large relative to any single run's footprint**:
+  `420` nodes / `26,976` total CPUs, `PriorityTier=1` (baseline, not
+  deprioritized). A `200`-core ask is under `1%` of partition capacity.
+
+Interpretation: revise the earlier "fairshare rules out deprioritization"
+conclusion — it was true but incomplete. This project's *own* usage pattern is
+not a deprioritization risk (user-level fairshare is extremely healthy, and a
+single `4200`-image run barely dents it). But priority also depends on factors
+this project doesn't fully control or hasn't verified: institution-wide AMC
+usage on Alpine (currently at parity, not headroom), job-size and QOS weights
+that outrank fairshare, an unused QOS with nonzero priority already sitting on
+this association, and an allocation tier that's administratively invisible
+from the Boulder side. None of this is confirmed to currently *cause*
+deprioritization — but the earlier "ruled out" framing overstated what a
+single fairshare check can actually tell you. Ordinary multi-tenant queue
+contention (`squeue -p acpu | wc -l`, `sinfo -p acpu` immediately before a real
+run) is still the most directly checkable residual risk, but not the only one
+anymore.
 
 ## Synthetic Experiment Findings
 
@@ -550,6 +671,46 @@ Observed result:
 
 This confirms the orchestration shape for tiny CPU-first 3D feature work, but it
 does not validate real ZedProfiler imports or image I/O.
+
+**Full 6-feature real-data run through Nextflow (2026-08-07).** Wrote a small
+standalone workflow (`workflows/real_feature_probe.nf`, not part of the
+`bin/formascute` experiment framework — a one-off validation, invoked directly
+via `nextflow run ... -profile alpine`) that loads the same real tutorial
+image/mask pair used in the direct-`sbatch` probe above, plus a second-channel
+image for colocalization, and calls all `6` real ZedProfiler feature
+extractors with explicit `memory '4 GB'` / `cpus 2` process directives:
+
+```bash
+FORMASCUTE_ACCOUNT=amc-general FORMASCUTE_PARTITION=acpu FORMASCUTE_QOS=cpu-normal \
+  nextflow run workflows/real_feature_probe.nf -profile alpine \
+  --image1 <image.tif> --label1 <mask.tiff> --image2 <second-channel.tif>
+```
+
+Result — real, measured per-image-set cost for the full feature set, not a
+partial one:
+
+- `intensity`: `1.37s`
+- `volume_size_shape`: `0.382s`
+- `neighbors`: `0.107s`
+- `texture`: `1.269s`
+- `granularity`: `12.47s`
+- `colocalization`: `7.376s`
+- **total: `~23.0s` for one real image set, all `6` features, `5/5` objects,
+  all finite, exit `0`**
+- `sacct` confirmed `AllocTRES=cpu=2,mem=4G,node=1` (the explicit directives
+  were honored) and `MaxRSS=1052144K` (`~1.0 GB`) — comfortably under the `4 GB`
+  request, no OOM, and essentially the same peak as the earlier partial
+  `3`-feature run, confirming memory use is dominated by one internal peak
+  (image/array loading) rather than growing per additional feature call
+
+The two cheaper/faster features that overlap with the earlier partial probe
+(`intensity`, `volume_size_shape`) came in noticeably faster here (`1.37s`
+vs. `2.835s`, `0.382s` vs. `0.599s`) while `granularity` was close both times
+(`12.47s` vs. `12.878s`). Treat that spread as ordinary run-to-run variance
+(different compute node, cache/JIT warmup), not a discrepancy to chase — use
+the `~23.0s` full-feature number as the current best real estimate for a
+single production task, and note `granularity` and `colocalization` together
+account for about `86%` of it.
 
 **Gotcha, first Apptainer-through-Nextflow attempt failed:** running
 `zp_apptainer_probe` (the `zp_synthetic_features` workload with
@@ -750,6 +911,14 @@ requirement noted in ZedProfiler Runtime.
   the `.def` file on a shared filesystem (scratch/project), not `/tmp` on the
   login node — compute nodes have their own local `/tmp`, not shared with the
   login node.
+- Do not assume older successful runs prove current Slurm submission behavior.
+  As of `2026-08-07`, Alpine rejects any `sbatch` submission with no walltime
+  (`Error 17: Time has not been specified ... Specifying job run time is now
+  required`), including individual per-task submissions generated by Nextflow's
+  Slurm executor, not just the coordinator job. This broke a previously-working
+  workflow with no code change on our side — see Slurm Defaults for the fix
+  (`process.time` now set in `conf/alpine.reference.config`). Re-check this
+  kind of platform-policy assumption after any CURC maintenance window.
 
 ## Questions To Revisit With CURC
 
@@ -795,3 +964,17 @@ Still open, revisit after real imaging traces exist:
   not necessarily an Alpine-specific question) before trusting any remembered
   upstream number for time-budget planning — always re-measure against the
   exact installed version instead.
+- What allocation tier is `amc-general` actually in (Trailhead-equivalent
+  auto-allocation vs. a properly-approved Ascent/Peak-equivalent tier), given
+  CURC's own docs say this affects job priority and that AMC allocations are
+  administratively invisible from standard Slurm queries on the Boulder side?
+  This needs `hpcsupport@cuanschutz.edu` or the project's CURC contact, not
+  another `sacctmgr` probe.
+- Is `cpu-long` (`QOS Priority=200`, vs. `cpu-normal`'s `Priority=0`, on the
+  same association) a viable substitute for production ZedProfiler runs, and
+  what tradeoffs (walltime commitment, core/node limits) come with it? Ask
+  before assuming `cpu-normal` is simply the right default.
+- Is there anything CURC can share about current or typical Anschutz-wide
+  (institution-level) usage on Alpine, given `LevelFS_Inst=1.0104` (parity, not
+  headroom) means this project's priority is partly gated by usage from other
+  AMC labs it has no visibility into?
