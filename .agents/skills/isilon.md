@@ -4,7 +4,12 @@ Use this note before mounting, testing, or transferring data to/from CU
 Anschutz's DBMI Isilon storage from a local machine. See
 `.agents/skills/petalibrary.md` for the PetaLibrary side of an
 Isilon-to-PetaLibrary transfer, and `.agents/skills/alpine.md` for Alpine/HPC
-knowledge — this file covers Isilon specifically.
+knowledge — this file covers Isilon specifically. For measured performance
+numbers, see `docs/storage-mount-benchmark.md` and the reproducible script at
+`examples/benchmark_storage_mount.sh` — this skill intentionally does not
+carry benchmark figures itself, since they're time/location/session-specific
+and go stale fast; re-run the script rather than trusting a number recorded
+here.
 
 **Data handling rule for this file, and for working with any real Isilon
 mount in this project: never record real share names, file names, directory
@@ -14,7 +19,9 @@ are lab-specific and can contain Confidential or Highly Confidential data per
 CU's data classification policy — the share name itself can identify a lab.
 It's fine to create, read, and delete disposable throwaway test files/dirs on
 a live share to validate behavior — just don't name or describe real shares
-or content anywhere durable.
+or content anywhere durable. This applies equally to `docs/storage-mount-
+benchmark.md` — that file records methodology and results, not real share
+names.
 
 ## Current Position
 
@@ -26,27 +33,15 @@ or content anywhere durable.
   (`src/mount_isilon.sh`) that mounts any share at
   `//data.ucdenver.pvt/dept/SOM/DBMI/<share>` to `~/mnt/<share>` using
   `mount_smbfs` on macOS or `mount.cifs` on Linux. See Mounting A Share.
-- One lab share on this machine is real, currently mounted, and matches the
-  script's `~/mnt/<share>` convention exactly — used below as the validated
-  reference mount. Its name is intentionally not recorded here (see the data
-  handling rule above); if you need to reference it directly, check `mount |
-  grep smbfs` locally rather than looking for a name in this file.
-- A second share name that was expected to also be live turned out **not**
-  to be a real share — confirmed by trying the exact mount the script would
-  attempt, plus several case variants, all rejected server-side with
-  `No such file or directory`. That response is itself useful signal: the
-  server was reachable and authenticated fine (same as for the real share),
-  so this specifically means the share doesn't exist under that name/path,
-  not a VPN or credentials problem. See Distinguishing "Share Doesn't Exist"
-  From Network/Auth Failures.
-- A cross-share comparison (real share vs. a second share) was requested but
-  couldn't be completed — the second name wasn't real, and no other live
-  share was available in this session. See Open Questions.
-- A small, non-destructive throughput probe against the live reference share
-  measured **~26 MB/s sequential write** over SMB/VPN, using a disposable,
-  prefixed, immediately-deleted test file. A true cold-read number wasn't
-  obtained — see Small Experiment: Throughput On A Live Share for why and
-  what would close that gap.
+- A real, live share on this machine follows that convention exactly and has
+  been used to validate the mount behavior and failure modes below. Its name
+  is intentionally not recorded here (see the data handling rule above); if
+  you need to reference it directly, check `mount | grep smbfs` locally
+  rather than looking for a name in this file.
+- A serious gotcha was found while probing this mount: unmounting a live
+  share to try to get a clean cache-free measurement can leave it unable to
+  reconnect non-interactively, even with working credentials. See Important
+  Failure Modes, and the full writeup in `docs/storage-mount-benchmark.md`.
 
 ## What Isilon Is
 
@@ -140,10 +135,9 @@ Confirmed directly in this project: `mount_smbfs` gives a clearly different
 error depending on failure cause, which is a fast first diagnostic:
 
 - **`No such file or directory`** — the server was reached and the client
-  authenticated, but the specific share/path doesn't exist. This is what
-  every attempt at the non-real share name returned in this project. Don't
-  chase VPN or credentials on this error; re-check the share name and case
-  with whoever administers it instead.
+  authenticated, but the specific share/path doesn't exist. Don't chase VPN
+  or credentials on this error; re-check the share name and case with
+  whoever administers it instead.
 - **`File exists`** — a local mount-point conflict, not a remote problem. See
   the CU-DBMI doc's own FAQ for this (stale mount entry, already mounted,
   or a directory in a state macOS won't mount over):
@@ -154,8 +148,8 @@ error depending on failure cause, which is a fast first diagnostic:
   ls -la ~/mnt/<ShareName>          # if not mounted, is it just an empty dir?
   rmdir ~/mnt/<ShareName>           # remove if empty and unmounted, then retry
   ```
-- **New in this project, a variant of the `File exists` case**: attempting to
-  `umount` a share that's *currently mounted and working* (not stale) can
+- **A variant of the `File exists` case found in this project**: attempting
+  to `umount` a share that's *currently mounted and working* (not stale) can
   itself return `Resource busy` if something still holds it open, and an
   immediate `mount_smbfs` retry on the same mount point then correctly fails
   `File exists` because the old mount never actually released. This is a
@@ -167,36 +161,6 @@ error depending on failure cause, which is a fast first diagnostic:
 - No network/ping failure was reproduced in this project (VPN/network was
   reachable throughout), so that failure path is documented from the
   CU-DBMI guide only, not independently confirmed here.
-
-## Small Experiment: Throughput On A Live Share
-
-*Scope: one real, live share (name deliberately not recorded — see the data
-handling rule at the top of this file), disposable test data only, no real
-share content named or referenced.*
-
-Method: created a dotfile-prefixed, PID-suffixed test file at the share root
-(`~/mnt/<share>/.claude-isilon-throughput-test-<pid>`), timed a sequential
-write, timed a read, then deleted it immediately and confirmed removal.
-
-Results:
-
-- Sequential write, 20 MB: `~26 MB/s` (`20971520 bytes in 0.805s`)
-- Sequential write, 50 MB: `~26 MB/s` (`52428800 bytes in 1.98s`) — consistent
-  with the smaller run, so `~26 MB/s` looks like a real network-write number,
-  not noise.
-- Read, both attempts: multiple GB/s, clearly serviced from the local page
-  cache (macOS SMB client caches a just-written file), **not** a real network
-  read number. Attempting to force a cold read via `umount`/remount hit the
-  `Resource busy` → `File exists` gotcha above, so a true cold-read number
-  wasn't captured in this session.
-- The live mount was left healthy and unaffected — confirmed via `mount |
-  grep smbfs` and a successful `stat` after the aborted remount attempt.
-
-Interpretation: `~26 MB/s` sequential write over SMB/VPN to Isilon is a
-reasonable planning number for small interactive tests, but this is `n=1`,
-one file size regime, one moment in time, and says nothing about read
-throughput, many-small-file performance, or behavior under concurrent access.
-Treat it as a rough calibration point, not a benchmark.
 
 ## Isilon → PetaLibrary Transfer (Globus)
 
@@ -266,7 +230,15 @@ a tool for Highly-Confidential-classified research data specifically.
 - Do not benchmark "read throughput" by reading a file immediately after
   writing it on the same mount without clearing the client cache first — the
   local page cache will report multi-GB/s numbers that have nothing to do
-  with the actual network/share performance.
+  with the actual network/share performance. See
+  `docs/storage-mount-benchmark.md`.
+- Do not unmount a live, in-use Isilon mount to try to force a cold read for
+  benchmarking. Confirmed in this project: the remount can fail with
+  `Authentication error` even using the exact command and keychain entry
+  that mounted it successfully moments earlier, leaving it unmounted until a
+  human reconnects interactively. The benchmark number isn't worth the risk
+  of an unplanned outage on a mount someone is actively relying on. Full
+  incident writeup: `docs/storage-mount-benchmark.md`.
 - Do not write real Isilon share names, file/directory names, listings, or
   content into this skill, commit messages, or any other durable repo
   artifact — share names here are lab-identifying, and some shares may hold
@@ -279,18 +251,15 @@ a tool for Highly-Confidential-classified research data specifically.
 ## Open Questions
 
 - What is a second real, accessible DBMI Isilon share to properly compare
-  against the one validated in this session (the original ask that motivated
-  this skill)? The second name tried is confirmed not to be one. Once
-  identified, repeat the throughput probe above against it and compare
-  like-for-like — keep the actual share names out of what gets committed.
-- What does a genuinely cold SMB read throughput number look like for a
-  share like this? Needs a clean way to drop the local page cache (a real
-  unmount cycle without hitting the `Resource busy` conflict, or reading
-  from a second client/host) that wasn't achieved in this session.
+  against the one validated so far? Still open — see
+  `docs/storage-mount-benchmark.md` Open Questions for the fuller list of
+  what a repeat run should try to answer.
+- Why did a remount fail with `Authentication error` right after a clean
+  `umount`, using the same command and keychain entry that worked moments
+  before? Worth asking CU Anschutz IT/DBMI directly rather than guessing —
+  possibly session-token vs. keychain-password behavior specific to this SMB
+  server or client.
 - Does this machine's keychain-based no-prompt `mount_smbfs` behavior hold
   for other DBMI Isilon shares/users, or is it specific to already having a
-  cached credential for `data.ucdenver.pvt` from mounting the reference share
-  previously? Untested against a host with no prior keychain entry.
-- Is there a CURC/DBMI-documented expected throughput or latency range for
-  Isilon over VPN to compare the `~26 MB/s` write figure against, or is
-  informal measurement like this the only calibration available?
+  cached credential for `data.ucdenver.pvt`? Untested against a host with no
+  prior keychain entry.

@@ -4,7 +4,20 @@ Use this note before mounting, transferring to/from, or reasoning about quotas
 and access methods for CU Boulder/Anschutz's PetaLibrary storage service, as
 used from a local machine or from Alpine. See `.agents/skills/alpine.md` for
 general Alpine/SSH/Slurm knowledge — this file covers PetaLibrary specifically
-and cross-references that file rather than repeating it.
+and cross-references that file rather than repeating it. For measured
+performance numbers, see `docs/storage-mount-benchmark.md` and the
+reproducible script at `examples/benchmark_storage_mount.sh` — this skill
+intentionally does not carry benchmark figures itself, since they're
+time/location/session-specific and go stale fast; re-run the script rather
+than trusting a number recorded here.
+
+**Data handling rule, same as `.agents/skills/isilon.md`: never record real
+allocation/directory names, file names, or directory listings from inside
+`/pl/active` (or any other PetaLibrary path) in this skill, in commit
+messages, or anywhere else committed to the repo.** Allocation subdirectory
+names under `/pl/active` are lab/group-identifying, and contents may include
+Confidential or Highly Confidential data. Disposable, clearly-marked test
+files/dirs are fine to create and immediately delete for validation.
 
 ## Current Position
 
@@ -14,13 +27,20 @@ and cross-references that file rather than repeating it.
   login node. See What PetaLibrary Is.
 - `/pl/active` is a real, listable, top-level directory on
   `login.rc.colorado.edu` containing per-group/per-project subdirectories
-  (confirmed via plain `ssh`: 255 entries, mixed ownership/permissions). Which
-  specific subdirectory under it belongs to this project has not been
-  identified yet — see Open Questions.
-- sshfs-mounting `/pl/active` from a local Mac is validated up through the SSH
-  layer (connects, authenticates, lists real directory contents) but the
-  actual FUSE mount has not yet completed successfully — see sshfs Access for
-  the exact blocker and the command to finish it interactively.
+  (confirmed via plain `ssh`: 255 entries, mixed ownership/permissions). This
+  project's specific allocation subdirectory has since been identified and
+  confirmed reachable, but its name is intentionally not recorded here — see
+  the data handling rule above.
+- sshfs-mounting `/pl/active` at `~/mnt/alpine` is now fully working end to
+  end — the FUSE approval blocker noted earlier in this file was cleared
+  (presumably by the user completing the interactive macOS approval step),
+  and this project's allocation subdirectory is listable and writable
+  through it. See sshfs Access for the mount command. Note: at last check the
+  live mount layout had shifted to separate `~/mnt/alpine/active` and
+  `~/mnt/alpine/archive` subpaths rather than `~/mnt/alpine` itself being
+  `/pl/active` directly — worth confirming current layout with `mount | grep
+  macfuse` before relying on the exact path below, since this file hasn't
+  been re-validated against that change.
 - Don't reuse the `ssh-alpine` zsh alias for sshfs or any non-shell tool. It's
   a shell alias, not an SSH config entry, so tools that exec `ssh` directly
   (sshfs, rsync, some Globus/rclone flows) can't resolve it. Use the
@@ -146,24 +166,25 @@ sshfs alpine:/pl/active ~/mnt/alpine \
   -o volname=PetaLibrary
 ```
 
-### Known blocker: FUSE mount doesn't register when launched non-interactively
+### Former blocker (resolved): FUSE mount didn't register when launched non-interactively
 
-Running the command above from a non-interactive/sandboxed subprocess (e.g. a
-coding agent's shell tool) connects and authenticates successfully — `ps`
-shows the `sshfs` process alive and sleeping — but the mount never appears in
-`mount`/`df -h`, even with the sandbox disabled for that one call. The
+Running the mount command from a non-interactive/sandboxed subprocess (e.g. a
+coding agent's shell tool) connected and authenticated successfully — `ps`
+showed the `sshfs` process alive and sleeping — but the mount never appeared
+in `mount`/`df -h`, even with the sandbox disabled for that one call. The
 macFUSE kernel extension was already loaded
-(`io.macfuse.filesystems.macfuse.25 (5.1.3)` per `kmutil showloaded`), so
-it's not a totally-missing-extension problem. This matches the known macFUSE
+(`io.macfuse.filesystems.macfuse.25 (5.1.3)` per `kmutil showloaded`), so it
+wasn't a totally-missing-extension problem. This matched the known macFUSE
 behavior of requiring a one-time interactive approval (System Settings →
 Privacy & Security system-extension prompt, and/or Full Disk Access for the
 terminal app actually running the command) that can only be granted from a
 real interactive terminal session, not a tool-invoked subprocess.
 
-**Fix:** run the `sshfs` command directly in an interactive terminal
-(not through an agent/subprocess) so any macOS permission dialog reaches the
-user, approve it if prompted, then re-run the same command. Once granted,
-subsequent mounts from either context should succeed without re-prompting.
+**Resolved**: after the user ran the same `sshfs` command directly in their
+own interactive terminal (presumably clearing a permission prompt there), the
+mount now works from both interactive and non-interactive contexts without
+re-prompting. If this ever regresses (e.g. after a macOS/macFUSE update),
+re-run the mount command interactively once to clear it again.
 
 ### To unmount
 
@@ -172,6 +193,16 @@ umount ~/mnt/alpine
 # or, if that fails:
 diskutil unmount ~/mnt/alpine
 ```
+
+**Caution**, per a real incident on the Isilon side of this project (see
+`.agents/skills/isilon.md` and `docs/storage-mount-benchmark.md`): unmounting
+a live, in-use mount to force a cold-cache benchmark read can leave it unable
+to remount non-interactively, even when the original mount command worked
+fine moments before. Don't unmount this PetaLibrary mount just to chase a
+benchmark number if it's otherwise in active use. For measured
+listing/write/read timing on this mount, see
+`docs/storage-mount-benchmark.md` and re-run
+`examples/benchmark_storage_mount.sh` rather than trusting a stale number.
 
 ## Globus Access
 
@@ -321,9 +352,12 @@ leaving a stored access token around.
 
 ## Open Questions
 
-- Which specific subdirectory under `/pl/active` (or `/pl/archive`) is this
-  project's actual allocation? Not yet identified — `/pl/active` was mounted
-  at its top level per explicit request, not a specific project path.
+- This project's actual allocation subdirectory under `/pl/active` is now
+  identified and confirmed reachable/writable (name intentionally not
+  recorded here). Worth updating the sshfs mount command to target that
+  specific subdirectory directly rather than the whole `/pl/active` tree, if
+  day-to-day use doesn't actually need visibility into other groups'
+  allocations.
 - Which PetaLibrary tier does this project actually hold (Active, Archive,
   Active+Archive, Archive+DR)? Determines whether direct compute-node access
   is possible at all, or whether every real run needs a staging step.
