@@ -128,15 +128,15 @@ Host alpine
 odd username and identity file live in config instead of the command line.
 Validated: `ssh -o BatchMode=yes alpine "echo ok"` succeeds, and
 `ssh alpine "ls -la /pl/active"` lists real content (255 entries, mixed
-ownership — some world-readable directories like `acuna`, `AMC_GenomicsCore_seqdata1`;
-some group-restricted like `Anschutz_BDC` at `drwxrws---.`).
+ownership — a mix of world-readable, root-owned directories and a smaller
+number of group-restricted ones at `drwxrws---.`-style permissions).
 
 ### Mount command and local convention
 
 This machine already uses a `~/mnt/<name>` convention for other remote
-mounts (`~/mnt/bandicoot` is an active `smbfs` mount; `~/mnt/koala`,
-`~/mnt/alpine`, etc. exist as prepared-but-empty mount points). Use
-`~/mnt/alpine` for PetaLibrary rather than inventing a new location:
+mounts — some are active `smbfs` mounts to other storage systems (see
+`.agents/skills/isilon.md`), others exist as prepared-but-empty mount points.
+Use `~/mnt/alpine` for PetaLibrary rather than inventing a new location:
 
 ```bash
 mkdir -p ~/mnt/alpine   # already exists on this machine
