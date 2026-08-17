@@ -138,7 +138,7 @@ argument syntax. Two things that do **not** work around this, both tested:
 Add a `Host` block to `~/.ssh/config` (created fresh for this project — none
 existed before):
 
-```
+```text
 Host alpine
     HostName login.rc.colorado.edu
     User dabu57888@xsede.org

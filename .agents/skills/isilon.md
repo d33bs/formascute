@@ -143,6 +143,7 @@ error depending on failure cause, which is a fast first diagnostic:
 - **`File exists`** — a local mount-point conflict, not a remote problem. See
   the CU-DBMI doc's own FAQ for this (stale mount entry, already mounted,
   or a directory in a state macOS won't mount over):
+
   ```bash
   mount | grep <ShareName>          # already mounted?
   umount ~/mnt/<ShareName>          # unmount if so
@@ -150,6 +151,7 @@ error depending on failure cause, which is a fast first diagnostic:
   ls -la ~/mnt/<ShareName>          # if not mounted, is it just an empty dir?
   rmdir ~/mnt/<ShareName>           # remove if empty and unmounted, then retry
   ```
+
 - **A variant of the `File exists` case found in this project**: attempting
   to `umount` a share that's *currently mounted and working* (not stale) can
   itself return `Resource busy` if something still holds it open, and an

@@ -39,11 +39,12 @@ fi
 echo
 echo "nextflow"
 if have nextflow && nextflow -version >/dev/null 2>&1; then
-  nextflow config "$ROOT_DIR/workflows/synthetic.nf" \
-    -profile local_smoke \
+  nextflow \
     -c "$ROOT_DIR/nextflow.config" \
     -c "$ROOT_DIR/conf/characterization.config" \
     -c "$ROOT_DIR/conf/experiments/independent_jobs.config" \
+    config "$ROOT_DIR/workflows/synthetic.nf" \
+    -profile local_smoke \
     >/dev/null
   echo "ok: nextflow config local_smoke"
 else
