@@ -11,14 +11,15 @@ so the skills don't carry numbers that go stale.
 name, allocation name, file name, or directory listing from either system
 appears in this document — see the data handling rule in both skills for why.
 
-**Location/network:** every number below was measured from one client
-machine, physically in the greater Denver, Colorado area. Isilon access
-requires CU Anschutz VPN when off-campus (confirmed reachable throughout);
-whether VPN was active for the PetaLibrary/Alpine SSH leg specifically wasn't
-independently confirmed. Neither figure generalizes to a different client
-location, network path, on-campus/wired connection, or a different time of
-day — re-run the script for a current number rather than trusting anything
-here.
+**Location/network:** the first round of numbers below was measured from one
+client machine, physically in the greater Denver, Colorado area, off-campus.
+Isilon access requires CU Anschutz VPN when off-campus (confirmed reachable
+throughout); whether VPN was active for the PetaLibrary/Alpine SSH leg
+specifically wasn't independently confirmed. A second round was later
+measured from the same client machine, physically on-campus, with no VPN in
+use for either system. Neither round generalizes to a different client
+location, network path, or time of day — re-run the script for a current
+number rather than trusting anything here.
 
 ## Reproduce it yourself
 
@@ -45,8 +46,14 @@ directory it creates. Run it against any mounted path, e.g.:
 
 ```bash
 ./examples/benchmark_storage_mount.sh ~/mnt/<isilon-share> 20
-./examples/benchmark_storage_mount.sh ~/mnt/alpine/active 20
+./examples/benchmark_storage_mount.sh ~/mnt/alpine/active/<writable-allocation-subdir> 20
 ```
+
+Note: the top-level PetaLibrary `/pl/active` mount root is not directly
+writable by every account (it's shared across many allocations) — pointing
+the script straight at `~/mnt/alpine/active` will fail at the
+"create disposable test dir" step with `Permission denied`. Point it at a
+specific allocation subdirectory you have write access to instead.
 
 ## Known limitation: read timing isn't a real network number
 
@@ -86,7 +93,7 @@ cold read number is needed, the safer approach is reading from a second,
 independent client/host rather than disrupting a mount someone else may be
 relying on.
 
-## Results so far
+## Results: off-campus, VPN (Denver area)
 
 Two runs against one live Isilon share, one run against one PetaLibrary
 allocation subdirectory (via sshfs), same session unless noted.
@@ -122,16 +129,66 @@ Observations:
   directory-creation and small-listing operations).
 - No valid read (network, cold-cache) number exists for either system yet.
 
+## Results: on-campus, no VPN
+
+Two runs each against the same live Isilon share and the same PetaLibrary
+allocation subdirectory used above, same session, back-to-back. For
+PetaLibrary, "root" here means the same writable allocation subdirectory the
+test dir was created under (not the top-level `/pl/active` mount root, which
+this account can't write into directly and which lists hundreds of unrelated
+entries — not a fair comparison target). That makes the two "root" listings
+below closer to apples-to-apples than the VPN round above, since both are
+now a single, similarly-sized personal/working directory rather than one
+huge shared root vs. one small one.
+
+| Step | Isilon (SMB), run 1 | Isilon (SMB), run 2 | PetaLibrary (sshfs), run 1 | PetaLibrary (sshfs), run 2 |
+| --- | --- | --- | --- | --- |
+| List existing root | 0.244s | 0.087s | 0.278s | 0.073s |
+| Create test dir | 0.108s | 0.102s | 0.066s | 0.036s |
+| List empty test dir | 0.028s | 0.018s | 0.024s | 0.020s |
+| Write 20MB | 0.233s (~85.8 MB/s) | 0.212s (~94.3 MB/s) | 0.259s (~77.2 MB/s) | 0.244s (~82.0 MB/s) |
+| List dir w/ 1 file | 0.018s | 0.016s | 0.024s | 0.022s |
+| Read 20MB back | cache-inflated (multi-GB/s) | cache-inflated (multi-GB/s) | cache-inflated (~16.6 GB/s) | cache-inflated (~16.3 GB/s) |
+
+Observations:
+
+- **On-campus is dramatically faster than VPN for both systems.** Average
+  write throughput: Isilon ~90.1 MB/s on-campus vs. ~21.9 MB/s over VPN
+  (**~4.1x faster**); PetaLibrary ~79.6 MB/s on-campus vs. ~16.8 MB/s over
+  VPN (**~4.7x faster**, though the VPN figure is n=1). Both systems moved
+  from "low tens of MB/s" to "high tens/~90 MB/s" the moment the VPN hop was
+  removed — consistent with the VPN tunnel (not the storage backend) being
+  the dominant bottleneck in the earlier round.
+- **On-campus, Isilon and PetaLibrary are close, with Isilon modestly
+  ahead.** Write: Isilon averaged ~90.1 MB/s vs. PetaLibrary's ~79.6 MB/s
+  across two runs each — about 13% faster for Isilon, but with only n=2 per
+  system and a single run's spread (85.8 vs. 94.3 MB/s on Isilon alone)
+  already covering nearly that whole gap. Not a confident win either way.
+- **Directory listing/creation on-campus is essentially tied.** Empty-dir
+  listing: Isilon ~0.023s avg vs. PetaLibrary ~0.022s avg. No meaningful
+  difference at this scale — both are dominated by fixed per-call/round-trip
+  overhead rather than anything protocol-specific.
+- Read numbers are still cache-inflated on both systems and still don't tell
+  us anything about real read throughput, on-campus or otherwise.
+
 ## Open Questions
 
-- What does a genuinely cold read look like on either system? Needs a second,
-  independent client/host to avoid the unmount risk above.
+- What does a genuinely cold read look like on either system, on-campus or
+  over VPN? Needs a second, independent client/host to avoid the unmount
+  risk above.
 - Why did the Isilon remount fail with `Authentication error` right after a
   clean `umount`, using the same command and keychain entry that worked
-  moments before? Worth asking CU Anschutz IT/DBMI directly.
-- What would these numbers look like from a client on-campus, off VPN
-  entirely, or on VPN from a different geography? Everything so far is one
-  client, one network path, one time window.
+  moments before? Worth asking CU Anschutz IT/DBMI directly. (The mount was
+  later recovered interactively and is in use again for the on-campus
+  round.)
+- ~~What would these numbers look like from a client on-campus, off VPN
+  entirely?~~ Answered above: both systems are roughly 4-5x faster on-campus
+  than over VPN for writes, and the Isilon-vs-PetaLibrary gap narrows to
+  "close, Isilon modestly ahead" on-campus vs. the VPN round (too little VPN
+  data to compare fairly there — n=1 for PetaLibrary over VPN). Still open:
+  numbers from VPN on a different geography, or on-campus at a different
+  time of day — only one on-campus session (n=2 per system) has been
+  measured so far.
 - A genuine second Isilon share (to compare against the one used here) and a
   larger/more representative directory-entry-count comparison across systems
   are both still open — repeat the script against each once available.

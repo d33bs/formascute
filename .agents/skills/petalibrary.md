@@ -7,9 +7,11 @@ general Alpine/SSH/Slurm knowledge — this file covers PetaLibrary specifically
 and cross-references that file rather than repeating it. For measured
 performance numbers, see `docs/storage-mount-benchmark.md` and the
 reproducible script at `examples/benchmark_storage_mount.sh` — this skill
-intentionally does not carry benchmark figures itself, since they're
+intentionally does not carry exact benchmark figures itself, since they're
 time/location/session-specific and go stale fast; re-run the script rather
-than trusting a number recorded here.
+than trusting a number recorded here. It does carry a rough, order-of-
+magnitude expectation for off-campus-VPN vs. on-campus speed below, since
+that's useful for planning a transfer even without a fresh benchmark run.
 
 **Data handling rule, same as `.agents/skills/isilon.md`: never record real
 allocation/directory names, file names, or directory listings from inside
@@ -203,6 +205,42 @@ benchmark number if it's otherwise in active use. For measured
 listing/write/read timing on this mount, see
 `docs/storage-mount-benchmark.md` and re-run
 `examples/benchmark_storage_mount.sh` rather than trusting a stale number.
+
+## Expected Speeds: Off-Campus VPN vs. On-Campus
+
+*Scope: general expectation, not a guarantee. Based on one client machine's
+measurements in `docs/storage-mount-benchmark.md` (greater Denver, CO,
+off-campus over VPN vs. on-campus with no VPN, sshfs to the same allocation
+subdirectory both times). Treat this as "what order of magnitude to expect,"
+and re-run `examples/benchmark_storage_mount.sh` for a current number before
+relying on anything more precise.*
+
+- **Off-campus, over VPN (or via the Alpine login-node SSH hop generally):**
+  expect sequential write throughput in the **low tens of MB/s** (~16.8 MB/s
+  measured, one session — VPN involvement for this leg specifically wasn't
+  independently confirmed, so treat this figure as the "SSH-to-Alpine over a
+  home/off-campus network" case broadly, not strictly VPN-gated the way
+  Isilon is).
+- **On-campus:** expect roughly **4-5x faster** sequential write throughput
+  than the off-campus case — around **77-82 MB/s** measured, same
+  allocation subdirectory, same client.
+- Small-directory listing/creation stayed sub-second in both conditions
+  (roughly 0.02-0.07s on-campus vs. up to ~1.5s off-campus for listing a
+  large shared root) — write throughput is the more load-bearing number for
+  planning a transfer.
+- If a Globus/rclone/sshfs transfer feels unexpectedly slow off-campus,
+  network path (VPN or otherwise) is a more likely explanation than a
+  PetaLibrary-side problem — on-campus was consistently faster by a wide
+  enough margin (~4-5x) that it's the dominant variable, not the storage
+  backend.
+- This says nothing about read throughput (not validly measured in either
+  condition — the read step is always cache-inflated, see To Unmount above)
+  or behavior under concurrent access/many-small-files/larger transfers.
+- Isilon and PetaLibrary tracked each other reasonably closely within each
+  condition (see `.agents/skills/isilon.md` for its own version of this
+  section, and `docs/storage-mount-benchmark.md` for the numbers) — this is
+  about location/network, not a claim that one storage system beats the
+  other.
 
 ## Globus Access
 

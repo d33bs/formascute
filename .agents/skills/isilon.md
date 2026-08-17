@@ -7,9 +7,11 @@ Isilon-to-PetaLibrary transfer, and `.agents/skills/alpine.md` for Alpine/HPC
 knowledge — this file covers Isilon specifically. For measured performance
 numbers, see `docs/storage-mount-benchmark.md` and the reproducible script at
 `examples/benchmark_storage_mount.sh` — this skill intentionally does not
-carry benchmark figures itself, since they're time/location/session-specific
-and go stale fast; re-run the script rather than trusting a number recorded
-here.
+carry exact benchmark figures itself, since they're time/location/session-
+specific and go stale fast; re-run the script rather than trusting a number
+recorded here. It does carry a rough, order-of-magnitude expectation for
+off-campus-VPN vs. on-campus speed below, since that's useful for planning a
+transfer even without a fresh benchmark run.
 
 **Data handling rule for this file, and for working with any real Isilon
 mount in this project: never record real share names, file names, directory
@@ -161,6 +163,38 @@ error depending on failure cause, which is a fast first diagnostic:
 - No network/ping failure was reproduced in this project (VPN/network was
   reachable throughout), so that failure path is documented from the
   CU-DBMI guide only, not independently confirmed here.
+
+## Expected Speeds: Off-Campus VPN vs. On-Campus
+
+*Scope: general expectation, not a guarantee. Based on one client machine's
+measurements in `docs/storage-mount-benchmark.md` (greater Denver, CO,
+off-campus over CU Anschutz VPN vs. on-campus with no VPN, same share both
+times). Treat this as "what order of magnitude to expect," and re-run
+`examples/benchmark_storage_mount.sh` for a current number before relying on
+anything more precise.*
+
+- **Off-campus, over VPN:** expect sequential write throughput in the
+  **low tens of MB/s** (~17-26 MB/s measured across two sessions).
+- **On-campus, no VPN:** expect roughly **4x faster** sequential write
+  throughput than the VPN case — around **85-95 MB/s** measured, same share,
+  same client.
+- Small-directory listing/creation stayed sub-second in both conditions
+  (roughly 0.02-0.1s on-campus vs. up to a few seconds for a large root
+  listing over VPN) — write throughput is the more load-bearing number for
+  planning a transfer, not listing latency.
+- If a transfer or interactive session feels unexpectedly slow off-campus,
+  VPN overhead is a more likely explanation than an Isilon-side problem —
+  the on-campus/VPN gap observed here (~4x) was large enough that network
+  path, not the storage backend, was the dominant variable.
+- This says nothing about read throughput (not validly measured in either
+  condition — see the cache-inflation caveat in Important Failure Modes
+  below) or behavior under concurrent access/many-small-files/larger
+  transfers.
+- Isilon and PetaLibrary tracked each other reasonably closely within each
+  condition (see `.agents/skills/petalibrary.md` for its own version of this
+  section, and `docs/storage-mount-benchmark.md` for the numbers) — this is
+  about location/network, not a claim that one storage system beats the
+  other.
 
 ## Isilon → PetaLibrary Transfer (Globus)
 
